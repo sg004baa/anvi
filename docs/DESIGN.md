@@ -50,12 +50,13 @@
 - 元の入力欄への書き戻し（UIA 優先 / クリップボード貼り付け fallback）
 - 元アプリへのフォーカス復帰
 - 同時 1 セッションのみ。編集中にホットキーが押されたら既存ウィンドウへフォーカス
+- ローカルの `init.lua` による設定の上書き（→ 5.4）
 
 ### v1 でやらないこと
 
 - 複数セッション
 - エディタの差し替え（構成上は差し替え可能だが、機能としては提供しない）
-- 設定 GUI
+- 設定 GUI（設定はローカルの `init.lua` を直接書く）
 - 幅広いアプリケーションへの対応保証
 - クロスプラットフォーム対応
 - プラグインシステム
@@ -75,29 +76,29 @@ AI 補完 / スニペット / テンプレート / 編集履歴 / アプリご�
 ┌─────────────────────────────────────────────────┐
 │ anywhere-nvim.exe  (host)                       │
 │                                                 │
-│  - トレイアイコン                                │
-│  - グローバルホットキー                          │
-│  - UI Automation / クリップボード                │
-│  - 対象ウィンドウの HWND 保持とフォーカス復帰      │
-│  - Neovide ウィンドウの表示 / 非表示制御          │
-│  - セッション状態機械                            │
+│  - トレイアイコン                               │
+│  - グローバルホットキー                         │
+│  - UI Automation / クリップボード               │
+│  - 対象ウィンドウの HWND 保持とフォーカス復帰   │
+│  - Neovide ウィンドウの表示 / 非表示制御        │
+│  - セッション状態機械                           │
 └───────┬─────────────────────────────────────────┘
         │ msgpack-rpc (クライアントとして接続)
         │ 127.0.0.1:PORT
         ↓
-┌─────────────────────────────────────────────────┐
-│ nvim.exe --headless --listen 127.0.0.1:PORT     │
-│                                                 │
-│  - バッファの実体（常駐。セッション毎に死なない）  │
-│  - 同梱 init.lua のみをロード                    │
-└───────┬─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ nvim.exe --headless --listen 127.0.0.1:PORT      │
+│                                                  │
+│  - バッファの実体（常駐。セッション毎に死なない）│
+│  - 同梱 init.lua + ローカル設定をロード（→ 5.4） │
+└───────┬──────────────────────────────────────────┘
         ↑ ui_attach
         │
-┌───────┴─────────────────────────────────────────┐
-│ neovide.exe --server=127.0.0.1:PORT             │
-│                                                 │
-│  - 画面を出すだけ。常駐し、表示/非表示を切り替える  │
-└─────────────────────────────────────────────────┘
+┌───────┴────────────────────────────────────────────┐
+│ neovide.exe --server=127.0.0.1:PORT                │
+│                                                    │
+│  - 画面を出すだけ。常駐し、表示/非表示を切り替える │
+└────────────────────────────────────────────────────┘
 ```
 
 3 プロセスすべてがアプリ起動時に立ち上がり、終了まで生き続ける。
@@ -192,6 +193,32 @@ nvim の UI クライアントを名乗るとは `nvim_ui_attach` して redraw 
 - spawn 直後は nvim がまだ listen していない。host からの接続はリトライループで行う
 - 127.0.0.1 とはいえ、同一マシンの任意プロセスが nvim RPC（= 任意コード実行）に接続できる。個人ツールとして許容する
 
+### 4.7 ローカル設定は「同梱コアの後」に読む
+
+**判断:** 同梱コア → ローカル設定 → **契約の再宣言**、の順で読む。
+
+**却下案:** ローカル設定 → 同梱コア（後勝ちで同梱を守る）。
+
+一見すると「同梱を後に読めば壊れないので安全」に見えるが、三点で成立しない。
+
+1. **ローカル設定がほぼ無意味になる。** ローカル設定に書きたいものは実際には見た目とオプション（`wrap` / `number` / `colorscheme` / `listchars`）とキーマップである。同梱が後勝ちする以上、同梱が触れる項目は全て潰される。これを回避するには「同梱が何も設定しない」ようにするしかなく、そうなると守っているのは読み込み順ではなく同梱の空虚さである。
+
+2. **読み込み順は強制力ではない。** ローカル設定は `VimEnter` / `vim.schedule` / `defer_fn` で自分の処理を後ろへ回せる。順序は減速帯であって壁ではない。
+
+3. **そもそも守るべきものの大半は順序に依存しない。** 契約の中核である `buftype=acwrite`、`BufWriteCmd`、バッファローカルオプションは `start_session()` の中で **セッション毎に** 張られる。これはどちらの設定ファイルよりも遥かに後に実行されるため、読み込み順で壊されることが原理的にない。
+
+順序に対して脆いのは以下の 3 つだけである。
+
+- `ZZ` / `ZQ` のグローバルキーマップ
+- `:q` 系の `cnoreabbrev`
+- `VimLeavePre` の autocmd
+
+**そしてこの 3 つは、壊れても致命傷にならない。** 6.3 の安全網（RPC 切断検知 / Neovide プロセス watch）が既にこのケースを設計に織り込んでいる。`ZZ` が潰されて素の `:q!` が nvim に届いても、host は切断を検知してペアを再起動し Idle に戻る。データ破損ではなく機能低下として着地する。
+
+したがって **同梱コアを先に読み、ローカル設定に自由を与え、最後に上記 3 つだけを再宣言する** のが最善。ローカル設定は見た目とオプションを自由に上書きでき、契約は再宣言で復元され、再宣言すら遅延実行で掻い潜られた場合は安全網が受け止める。却下案が欲しかった保護を、却下案のコストを払わずに得られる。
+
+**注:** より重要なリスクは上書きではなく **ローカル設定の破損** である。文法エラーや存在しないモジュールの `require` 一つでアプリ全体が起動しなくなり、しかも原因が分かりにくい。**`pcall` で囲み、失敗しても同梱コアのみで続行すること**（→ 5.4）。
+
 ---
 
 ## 5. Neovim サーバー
@@ -203,7 +230,9 @@ set NVIM_APPNAME=anywhere-nvim
 nvim.exe --headless --listen 127.0.0.1:%PORT% -u <bundled>\init.lua --noplugin
 ```
 
-`-u` で指定しただけでは bundle ディレクトリは runtimepath に乗らない。**bundled init.lua の先頭で bundle ディレクトリを runtimepath に追加してから `require('anywhere')` すること**（→ 付録 A）。
+`-u` で指定しただけでは bundle ディレクトリは runtimepath に乗らない。**bundled init.lua の先頭で bundle ディレクトリを runtimepath に追加してから `require('anywhere')` すること**（→ 付録 A-1）。
+
+同梱 init.lua はエントリポイントであり、ローカル設定の読み込み順もここで決まる（→ 5.4）。
 
 ### 5.2 既存環境からの隔離（最重要）
 
@@ -225,7 +254,9 @@ lazy.nvim / Mason / nvim-treesitter / LSP がロードされると、常駐化�
 
 **セキュリティソフトの除外設定に同梱 exe を追加すること。** ESET を含む多くの製品は、署名のない新規 exe に対してスキャンやプロセス保護を行い、起動遅延やファイルアクセス拒否の原因になる。
 
-### 5.4 init.lua の方針
+### 5.4 init.lua の構成とローカル設定
+
+#### 同梱コアが持つもの
 
 初期状態では極力シンプルに保つ。以下のみを持つ。
 
@@ -235,7 +266,60 @@ lazy.nvim / Mason / nvim-treesitter / LSP がロードされると、常駐化�
 - `:q` 系の乗っ取り
 - 異常終了時の通知
 
-見た目やキーマップの追加は、実際に使って不便を感じてから行う。
+見た目やキーマップは同梱コアには入れない。ローカル設定側の領分とする。
+
+#### ローカル設定の場所
+
+**専用のディレクトリを新設しない。** `NVIM_APPNAME=anywhere-nvim` を指定している時点で、Neovim の設定ディレクトリは既にこのアプリ専用のものへ切り替わっている。
+
+```lua
+vim.fn.stdpath("config")  -- → $XDG_CONFIG_HOME/anywhere-nvim
+vim.fn.stdpath("data")    -- → $XDG_DATA_HOME/anywhere-nvim-data
+```
+
+**パスをハードコードしないこと。** `stdpath()` から導出すれば、APPNAME を変えたときも追従する。
+
+読み込む対象は `$XDG_CONFIG_HOME/anywhere-nvim/init.lua` の 1 ファイル。存在しなければ何もしない（ローカル設定は完全に任意）。
+
+> `XDG_CONFIG_HOME` 未設定時、Windows の Neovim はこれを `%LOCALAPPDATA%` として扱う（`AppData\Roaming` ではない）。したがって既定では `%LOCALAPPDATA%\anywhere-nvim\init.lua`。
+
+#### 読み込み順
+
+```
+1. 同梱コア（契約の確立）
+2. ローカル設定（pcall で保護）
+3. 契約の再宣言（キーマップ / abbrev / VimLeavePre）
+```
+
+判断の根拠と却下案は 4.7 を参照。実装は付録 A。
+
+#### 必須の防御
+
+- **`pcall` で囲む。** ローカル設定が例外を投げてもアプリは起動し続け、同梱コアのみで動作する。エラーは host へ通知してログに残す。囲まないと、typo 一つでアプリが無言で使えなくなる
+- **契約を再宣言する。** `ZZ` / `ZQ` / `:q` 系 abbrev / `VimLeavePre` を、ローカル設定の読み込み後にもう一度張り直す。`VimLeavePre` は augroup を `clear = true` で作り直して二重登録を防ぐ
+
+#### runtimepath
+
+ローカル設定から自前モジュールを `require` できるよう、`stdpath("config")` を runtimepath に加える。
+
+**同梱側を prepend、ローカル側を append すること。** 逆にするとローカル側の `lua/anywhere/` が同梱コアを丸ごと隠蔽してしまう。
+
+#### 起動コストについて
+
+**ローカル設定は nvim サーバーの起動時に一度だけ読まれる。セッション毎ではない。** セッション開始時にやっているのは `nvim_buf_set_lines` だけなので、**ローカル設定が重くてもホットキーからの体感速度には影響しない。** アプリ起動が遅くなるだけであり、常駐アプリではほぼ問題にならない。
+
+したがって「ローカル設定に何を書くと遅くなるか」の線引きは起動時コストではなく、**バッファ毎に走る処理があるかどうか**である。
+
+| 影響 | 例 |
+|---|---|
+| 起動時のみ。許容 | colorscheme、オプション、キーマップ、プラグイン導入そのもの |
+| **セッション毎に効く。要注意** | LSP の自動アタッチ、treesitter パース、`BufEnter` / `BufNewFile` 系 autocmd、重い statusline |
+
+#### `--noplugin` との関係
+
+`--noplugin` は元々ユーザーの通常設定を締め出すために入れたが、その役割は既に `NVIM_APPNAME` が担っている。現状の `--noplugin` が実際に止めているのは **このアプリ用ローカル設定配下の `plugin/` ディレクトリの自動読み込み** だけである。
+
+暗黙のロードを避けたいので v1 では維持する。ローカル設定からは明示的に `require` すること。プラグインマネージャを入れたくなったら、その時点で外すか判断する。
 
 ### 5.5 host のチャンネル ID の受け渡し
 
@@ -449,6 +533,12 @@ v1 では非対応。常に入力欄の全内容が対象。
 
 同梱 exe を除外設定に入れないと、起動遅延やファイルアクセス拒否が発生しうる。
 
+### 10.7 ローカル設定は契約を壊しうる
+
+`pcall` と契約の再宣言で大半は防げるが、ローカル設定が `vim.schedule` / `VimEnter` 等で遅延実行すれば `ZZ` や abbrev を潰せる（→ 4.7）。
+
+その場合の着地点は「素の `:q!` が nvim に届き、host が切断を検知してペアを再起動する」であり、編集内容が失われる以上の被害はない。**設定を書くのは自分自身なので、これ以上の防御はしない。**
+
 ---
 
 ## 11. 実装スタック
@@ -522,11 +612,20 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 - `AttachThreadInput` / `AllowSetForegroundWindow`
 - 実アプリでの検証。ここは試行錯誤になる
 
-### ステップ 6 — 実際に使い、不便を潰す
+### ステップ 6 — ローカル設定の読み込み
 
-必要になった機能のみ init.lua に追加していく。
+同梱コアが安定してから入れる。実装量は小さい（→ 付録 A-1）。
 
-### （将来）ステップ 7 — 自前 UI
+- `$XDG_CONFIG_HOME/anywhere-nvim/init.lua` があれば `pcall` で読む
+- 読み込み後に `enforce_contract()` を呼ぶ
+- 検証: ローカル設定で `ZZ` を潰す → 再宣言で戻ることを確認
+- 検証: ローカル設定に文法エラーを仕込む → アプリが起動し、host に `init_error` が届くことを確認
+
+### ステップ 7 — 実際に使い、不便を潰す
+
+見た目やオプションはローカル設定へ。同梱コアに追加するのは、契約に関わるものだけに留める。
+
+### （将来）ステップ 8 — 自前 UI
 
 やりたくなったら独立プロジェクトとして。IME の設計から始めること。
 
@@ -534,28 +633,71 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 
 ## 付録 A: init.lua の骨組み
 
+### A-1. 同梱 init.lua（エントリポイント）
+
+`-u` で指定されるファイル。ここが読み込み順の全てを決める（→ 4.7 / 5.4）。
+
 ```lua
--- lua/anywhere/init.lua （bundled init.lua から require する）
---
--- 前提: bundled init.lua は先頭で bundle ディレクトリを runtimepath に追加すること。
--- そうしないとこのモジュールの require が解決できない。
---   vim.opt.runtimepath:prepend(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)))
---   require("anywhere")
+-- <bundled>/init.lua
+
+-- 同梱ディレクトリは prepend（ローカル側に lua/anywhere/ があっても隠蔽されないよう先に置く）
+local bundle = vim.fs.dirname(debug.getinfo(1, "S").source:sub(2))
+vim.opt.runtimepath:prepend(bundle)
+
+local aw = require("anywhere")
+
+-- 1. 同梱コア。契約を確立する
+aw.setup()
+
+-- 2. ローカル設定（任意）。壊れていても起動を止めない
+local cfg_dir  = vim.fn.stdpath("config")            -- = $XDG_CONFIG_HOME/anywhere-nvim
+local cfg_file = vim.fs.joinpath(cfg_dir, "init.lua")
+
+if vim.uv.fs_stat(cfg_file) then
+  vim.opt.runtimepath:append(cfg_dir)                -- ローカル側は append
+  local ok, err = pcall(dofile, cfg_file)
+  if not ok then
+    -- 起動は続行する。原因が分かるよう host には必ず伝える
+    aw.report_error("user_config_error", tostring(err))
+  end
+end
+
+-- 3. 契約の再宣言。ローカル設定に潰されていても戻す
+aw.enforce_contract()
+```
+
+> `vim.uv` / `vim.fs.joinpath` は Neovim 0.10+。同梱する nvim のバージョンを下げる場合は
+> `vim.loop` / 手動のパス結合に読み替えること。
+
+### A-2. コアモジュール
+
+```lua
+-- <bundled>/lua/anywhere/init.lua
 
 local M = {
   host = nil,  -- host の RPC チャンネル ID
   buf  = nil,  -- 現在のセッションバッファ
 }
 
---- host が接続時に呼ぶ
-function M.set_host(chan)
-  M.host = chan
-end
-
 local function notify(event, payload)
   if M.host then
     vim.rpcnotify(M.host, event, payload)
   end
+end
+
+--- 起動時のエラー報告。この時点ではまだ host が接続していないので溜めておく
+M.pending_errors = {}
+function M.report_error(kind, msg)
+  table.insert(M.pending_errors, { kind = kind, message = msg })
+end
+
+--- host が接続時に呼ぶ
+function M.set_host(chan)
+  M.host = chan
+  for _, e in ipairs(M.pending_errors) do
+    notify("init_error", e)   -- host 側でログに出す
+  end
+  M.pending_errors = {}
 end
 
 --- host がセッション開始時に呼ぶ
@@ -591,39 +733,55 @@ local function finish()
   notify("session_end", nil)
 end
 
--- bang = true は必須。`:q!` は abbrev 展開で「AwQuit!」の形になるため
-vim.api.nvim_create_user_command("AwWriteQuit", function()
-  vim.cmd("write")   -- BufWriteCmd 経由で内容が host に渡る
-  finish()
-end, { bang = true })
+--- 同梱コア。ローカル設定より前に一度だけ呼ぶ
+function M.setup()
+  -- bang = true は必須。`:q!` は abbrev 展開で「AwQuit!」の形になるため
+  vim.api.nvim_create_user_command("AwWriteQuit", function()
+    vim.cmd("write")   -- BufWriteCmd 経由で内容が host に渡る
+    finish()
+  end, { bang = true })
 
-vim.api.nvim_create_user_command("AwQuit", function()
-  finish()
-end, { bang = true })
+  vim.api.nvim_create_user_command("AwQuit", function()
+    finish()
+  end, { bang = true })
 
-vim.keymap.set("n", "ZZ", "<Cmd>AwWriteQuit<CR>")
-vim.keymap.set("n", "ZQ", "<Cmd>AwQuit<CR>")
-
--- :q 系の乗っ取り（網羅的ではない。抜けたら追加する）
-local function abbr(lhs, rhs)
-  vim.cmd(([[cnoreabbrev <expr> %s (getcmdtype()==#':' && getcmdline()==#%q) ? %q : %q]])
-    :format(lhs, lhs, rhs, lhs))
+  -- 見た目やオプションはここに入れない。ローカル設定の領分（→ 5.4）
 end
 
-abbr("q",  "AwQuit")
-abbr("q!", "AwQuit")
-abbr("wq", "AwWriteQuit")
-abbr("x",  "AwWriteQuit")
+--- 契約の再宣言。ローカル設定を読み込んだ後に呼ぶ（→ 4.7）
+--- 順序に対して脆いのはここに集約されている 3 つだけ
+function M.enforce_contract()
+  -- 1. キーマップ
+  vim.keymap.set("n", "ZZ", "<Cmd>AwWriteQuit<CR>")
+  vim.keymap.set("n", "ZQ", "<Cmd>AwQuit<CR>")
 
--- 安全網: 乗っ取りを抜けて本当に終了しようとした場合
-vim.api.nvim_create_autocmd("VimLeavePre", {
-  callback = function()
-    notify("nvim_dying", nil)
-  end,
-})
+  -- 2. :q 系の乗っ取り（網羅的ではない。抜けたら追加する）
+  local function abbr(lhs, rhs)
+    vim.cmd(([[cnoreabbrev <expr> %s (getcmdtype()==#':' && getcmdline()==#%q) ? %q : %q]])
+      :format(lhs, lhs, rhs, lhs))
+  end
+
+  abbr("q",  "AwQuit")
+  abbr("q!", "AwQuit")
+  abbr("wq", "AwWriteQuit")
+  abbr("x",  "AwWriteQuit")
+
+  -- 3. 安全網: 乗っ取りを抜けて本当に終了しようとした場合
+  --    clear = true で二重登録を防ぐ（再宣言されうるため）
+  local grp = vim.api.nvim_create_augroup("AnywhereContract", { clear = true })
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = grp,
+    callback = function()
+      notify("nvim_dying", nil)
+    end,
+  })
+end
 
 return M
 ```
+
+> 再宣言でも防げないケース（ローカル設定が `vim.schedule` 等で後から潰す）は残るが、
+> その場合も 6.3 の安全網が受け止める。データ破損ではなく機能低下として着地する。
 
 ---
 
@@ -670,6 +828,10 @@ match event.as_str() {
             }
         }
         state.phase = Phase::Idle;
+    }
+    "init_error" => {
+        // ローカル設定の読み込み失敗。起動は続行済み。ログに残すだけ（→ 5.4）
+        log::warn!("user config error: {:?}", args);
     }
     "nvim_dying" => {
         if !state.shutting_down {  // 意図的シャットダウン中は無視（→ 6.3 誤発火）
