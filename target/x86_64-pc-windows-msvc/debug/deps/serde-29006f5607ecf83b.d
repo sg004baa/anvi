@@ -1,0 +1,12 @@
+/home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/deps/serde-29006f5607ecf83b.d: /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/build/serde-f514b8e7f5e6016c/out/private.rs
+
+/home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/deps/libserde-29006f5607ecf83b.rmeta: /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/build/serde-f514b8e7f5e6016c/out/private.rs
+
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/build/serde-f514b8e7f5e6016c/out/private.rs:
+
+# env-dep:OUT_DIR=/home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/build/serde-f514b8e7f5e6016c/out

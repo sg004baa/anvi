@@ -1,0 +1,9 @@
+/home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/deps/global_hotkey-f1ac7a34a173b59d.d: /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/lib.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/error.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/hotkey.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/platform_impl/mod.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/platform_impl/windows/mod.rs
+
+/home/sg004baa/ghq/github.com/sg004baa/anywhere-nvim/target/x86_64-pc-windows-msvc/debug/deps/libglobal_hotkey-f1ac7a34a173b59d.rmeta: /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/lib.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/error.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/hotkey.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/platform_impl/mod.rs /home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/platform_impl/windows/mod.rs
+
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/lib.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/error.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/hotkey.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/platform_impl/mod.rs:
+/home/sg004baa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/global-hotkey-0.8.0/src/platform_impl/windows/mod.rs:
