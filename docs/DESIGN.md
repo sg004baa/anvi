@@ -13,6 +13,7 @@
 - 5〜9章: 各コンポーネントの詳細仕様
 - 10章: 既知の限界（実装前に必ず読むこと）
 - 11〜12章: 実装順序と受け入れ条件
+- 13章: 配布（インストーラ / scoop）
 - 付録: 動くコードの骨組み
 
 **実装は 12 章の順序で進めること。** ステップ 1 が通るまで他に手を出さない。
@@ -632,6 +633,51 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 ### ステップ 8 — 自前 UI（実施済み）
 
 Neovide の IME が使い物にならなかったため実施（→ 4.2）。順序は core の状態モデル（`ui`）→ キー記法（`ui::input`）→ Direct2D レンダラ → winit シェルと host 統合。**IME は最後の仕上げではなく、設計の出発点に置くこと。**
+
+---
+
+## 13. 配布
+
+配布物は 2 つ。中身（`stage/anywhere-nvim`）は完全に同一で、包み方だけが違う。
+
+| 形式 | 資産名 | 用途 |
+|---|---|---|
+| portable zip | `anywhere-nvim-vX.Y.Z-windows-x64-portable.zip` | 展開して置くだけ。scoop もこれを使う |
+| インストーラ | `anywhere-nvim-vX.Y.Z-windows-x64-setup.exe` | 自動起動・スタートメニュー・アンインストーラが要る場合 |
+
+どちらもタグ push（`v[0-9]+.[0-9]+.[0-9]+*`）で `release.yml` が作る。ワークスペースの
+version とタグが食い違っていれば `verify-version` がその場で落とす。
+
+### 13.1 インストーラ（`installer/anywhere-nvim.iss`, Inno Setup 6）
+
+- インストール先は `%LOCALAPPDATA%\Programs\anywhere-nvim`。**管理者権限を要求しない**
+  （`PrivilegesRequired=lowest`）。個人ツールに UAC を挟む理由が無い
+- タスク `startup`（既定 ON）が `HKCU\...\CurrentVersion\Run` に登録する。常駐しない
+  ホットキーツールは使い物にならないので既定は ON、ウィザードで外せる
+- **上書きインストール前に `taskkill /F /T /IM anywhere-nvim.exe` で常駐を落とす。**
+  `×` はセッションの破棄であってアプリの終了ではない（→ 7.2）ため、再起動マネージャに
+  任せると閉じられずに止まる。`CloseApplications=no` はそのための明示指定
+- アンインストールは既定でユーザーデータ（`%LOCALAPPDATA%\anywhere-nvim` のローカル設定と
+  `%LOCALAPPDATA%\anywhere-nvim-data` の shada/state）も消す。`/KEEPDATA` を付けると残す。
+  対話時は MsgBox で確認する（`/SUPPRESSMSGBOXES` は `MsgBox` を抑止しないので、
+  MsgBox は必ず `UninstallSilent` が偽の枝にだけ置くこと）
+- インストール先（`Programs\anywhere-nvim`）とローカル設定（`anywhere-nvim`）は別物。
+  前者にはアンインストーラ以外触らない
+
+release.yml は毎回サイレントで「インストール → 配置と Run 値の確認 → `/KEEPDATA` で
+アンインストールしてデータが残ることの確認 → 再インストール → 既定でアンインストールして
+全部消えることの確認」まで回す。`unins000.exe` は `%TEMP%` へ自分を複製して即座に戻るので、
+削除完了はポーリングで待つ。
+
+### 13.2 scoop（個人 bucket）
+
+`sg004baa/scoop-bucket` の `bucket/anywhere-nvim.json`。portable zip を `extract_dir`
+`anywhere-nvim` で展開し、`bin` と `shortcuts` に `anywhere-nvim.exe` を出す。
+`checkver: github` + `autoupdate`（hash は `$url.sha256`）で追従する。
+
+scoop 経路では自動起動もアンインストール時のデータ削除も行われない。ユーザーデータは
+アプリディレクトリの外（`%LOCALAPPDATA%\anywhere-nvim*`）にあるので、更新でも
+`scoop uninstall` でも消えない。消したければ手で消す。
 
 ---
 

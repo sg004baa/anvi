@@ -7,7 +7,7 @@ members = ["crates/anywhere-core", "crates/anywhere-nvim"]
 default-members = ["crates/anywhere-core"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97"
 publish = false

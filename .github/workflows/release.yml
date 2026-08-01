@@ -14,7 +14,6 @@ env:
 
 jobs:
   verify-version:
-    name: tag == Cargo.toml
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -63,13 +62,14 @@ jobs:
           test -f nvim-win64/bin/nvim.exe
 
       # レイアウトの正は scripts/make-bundle.sh。ここで手で並べると必ずずれる。
+      # stage/anywhere-nvim が zip とインストーラの唯一の入力になる。
       - name: stage the bundle
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist/anywhere-nvim
-          cp target/release/anywhere-nvim.exe dist/anywhere-nvim/
-          scripts/make-bundle.sh nvim-win64 dist/anywhere-nvim
+          mkdir -p stage/anywhere-nvim
+          cp target/release/anywhere-nvim.exe stage/anywhere-nvim/
+          scripts/make-bundle.sh nvim-win64 stage/anywhere-nvim
 
       # 「起動はするが契約だけ死んでいる」バンドルを出さないための最終確認。
       # 常駐に成功すると bundle 解決・nvim 起動・ui_attach・トレイ・ホットキー登録が
@@ -78,8 +78,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $log = "dist\host.log"
-          $proc = Start-Process -FilePath "dist\anywhere-nvim\anywhere-nvim.exe" `
+          $log = "stage\host.log"
+          $proc = Start-Process -FilePath "stage\anywhere-nvim\anywhere-nvim.exe" `
             -RedirectStandardError $log -WindowStyle Hidden -PassThru
           try {
             $deadline = (Get-Date).AddSeconds(60)
@@ -102,16 +102,111 @@ jobs:
             Remove-Item $log -Force -ErrorAction SilentlyContinue
           }
 
-      - name: package
-        id: package
+      - name: package the portable zip
         shell: bash
         run: |
           set -euo pipefail
-          name="anywhere-nvim-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
-          (cd dist && 7z a -tzip "../${name}.zip" anywhere-nvim > /dev/null)
-          sha256sum "${name}.zip" > "${name}.zip.sha256"
-          echo "zip=${name}.zip" >> "$GITHUB_OUTPUT"
-          echo "sha=${name}.zip.sha256" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          (cd stage && 7z a -tzip "../dist/anywhere-nvim-${GITHUB_REF_NAME}-windows-x64-portable.zip" anywhere-nvim > /dev/null)
+
+      - name: compile the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $stageDir = (Resolve-Path "stage/anywhere-nvim").Path
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVersion=$version" "/DStageDir=$stageDir" "installer\anywhere-nvim.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+          $setup = "dist/anywhere-nvim-${{ github.ref_name }}-windows-x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "missing installer artifact: $setup" }
+
+      # インストーラは「入れて消えること」まで見ないと壊れていても気付けない。
+      # 常駐の起動確認は staged bundle 側で済ませてあるので、ここで見るのは
+      # 配置・自動起動エントリ・アンインストール時のユーザーデータの扱い。
+      - name: smoke install and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = (Resolve-Path "dist/anywhere-nvim-${{ github.ref_name }}-windows-x64-setup.exe").Path
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\anywhere-nvim"
+          $configDir = Join-Path $env:LOCALAPPDATA "anywhere-nvim"
+          $stateDir = Join-Path $env:LOCALAPPDATA "anywhere-nvim-data"
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+
+          $install = Start-Process -FilePath $setup `
+            -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "installer exited with code $($install.ExitCode)" }
+
+          foreach ($path in @(
+            "$installDir\anywhere-nvim.exe",
+            "$installDir\runtime\init.lua",
+            "$installDir\runtime\lua\anywhere\init.lua",
+            "$installDir\nvim\bin\nvim.exe",
+            "$installDir\nvim\share\nvim\runtime"
+          )) {
+            if (-not (Test-Path $path)) { throw "missing installed path: $path" }
+          }
+          & "$installDir\nvim\bin\nvim.exe" --headless +q
+          if ($LASTEXITCODE -ne 0) { throw "the installed nvim.exe failed to run" }
+          # startup タスクは既定で有効。silent インストールでも既定が適用される。
+          if (-not (Get-ItemProperty -Path $runKey -Name "anywhere-nvim" -ErrorAction SilentlyContinue)) {
+            throw "the startup registry value was not created"
+          }
+
+          # /KEEPDATA opt-out の検証用に、実データを模したファイルを植えておく。
+          New-Item -ItemType File -Path (Join-Path $configDir "init.lua") -Force | Out-Null
+          New-Item -ItemType File -Path (Join-Path $stateDir "shada\main.shada") -Force | Out-Null
+
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (-not (Test-Path $uninstaller)) { throw "uninstaller was not found: $uninstaller" }
+          $keep = Start-Process -FilePath $uninstaller `
+            -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/KEEPDATA' -Wait -PassThru
+          if ($keep.ExitCode -ne 0) { throw "uninstaller exited with code $($keep.ExitCode)" }
+          # unins000.exe は自身のコピーを %TEMP% へ spawn して即座に戻るため、
+          # 実際のファイル除去完了をポーリングで待つ (最大 30 秒)。
+          $removed = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            if (-not (Test-Path $installDir)) { $removed = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $removed) { throw "install directory remains after uninstall: $installDir" }
+          if (Get-ItemProperty -Path $runKey -Name "anywhere-nvim" -ErrorAction SilentlyContinue) {
+            throw "the startup registry value survived the uninstall"
+          }
+          # /KEEPDATA を付けたアンインストールでは、ユーザーデータは
+          # opt-out の仕様どおり削除されずに残っているはず。
+          if (-not (Test-Path $configDir)) { throw "/KEEPDATA removed the local config: $configDir" }
+          if (-not (Test-Path $stateDir)) { throw "/KEEPDATA removed the state dir: $stateDir" }
+
+          # 再インストールし、今度はフラグなし (既定 = 削除) でアンインストールする。
+          $reinstall = Start-Process -FilePath $setup `
+            -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait -PassThru
+          if ($reinstall.ExitCode -ne 0) { throw "re-installer exited with code $($reinstall.ExitCode)" }
+          if (-not (Test-Path "$installDir\anywhere-nvim.exe")) { throw "re-install did not place anywhere-nvim.exe" }
+          $defaultUninstall = Start-Process -FilePath (Join-Path $installDir "unins000.exe") `
+            -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait -PassThru
+          if ($defaultUninstall.ExitCode -ne 0) { throw "uninstaller exited with code $($defaultUninstall.ExitCode)" }
+          # 既定 = 削除の検証であり、CI の後始末も兼ねる。
+          $purged = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            if ((-not (Test-Path $installDir)) -and (-not (Test-Path $configDir)) -and (-not (Test-Path $stateDir))) {
+              $purged = $true
+              break
+            }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $purged) { throw "install dir or user data remains after the default uninstall" }
+
+      - name: checksum the artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in "anywhere-nvim-${GITHUB_REF_NAME}-windows-x64-portable.zip" \
+                   "anywhere-nvim-${GITHUB_REF_NAME}-windows-x64-setup.exe"; do
+            sha256sum "$f" > "$f.sha256"
+          done
 
       - name: create the github release
         shell: bash
@@ -119,8 +214,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          base="anywhere-nvim-${GITHUB_REF_NAME}-windows-x64"
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            "${{ steps.package.outputs.zip }}" \
-            "${{ steps.package.outputs.sha }}"
+            "dist/${base}-portable.zip" \
+            "dist/${base}-portable.zip.sha256" \
+            "dist/${base}-setup.exe" \
+            "dist/${base}-setup.exe.sha256"
