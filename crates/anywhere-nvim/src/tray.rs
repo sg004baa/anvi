@@ -16,20 +16,11 @@ use crate::gui::{ProxyHandle, UserEvent};
 
 const EXIT_ID: &str = "anywhere.exit";
 
-/// アイコンの辺（px）。
-const SIZE: i32 = 32;
-/// 角丸の半径（px）。
-const RADIUS: i32 = 6;
-const BG: [u8; 4] = [0x24, 0x2b, 0x33, 0xff];
-const FG: [u8; 4] = [0x8e, 0xc0, 0x7c, 0xff];
-/// 5x7 ビットマップの "A"。外部アセットもネットワークも要らないので絵はコードで持つ。
-const GLYPH: [u8; 7] = [
-    0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-];
-const GLYPH_W: i32 = 5;
-const GLYPH_H: i32 = 7;
-/// 5x7 を 4 倍して 20x28。32x32 の中に収まる。
-const GLYPH_SCALE: i32 = 4;
+/// exe に埋め込んだアイコンの名前 ID。`build.rs` の `set_icon` が付ける既定値で、
+/// エクスプローラやインストーラが出すアイコンと同一の実体を指す。
+const ICON_ID: u16 = 1;
+/// 読み出すサイズ（px）。ICO には 16〜256 が入っているので、通知領域の実寸を選ぶ。
+const ICON_SIZE: u32 = 32;
 
 pub struct Tray {
     /// 生かしておく必要がある。drop するとアイコンが消える。
@@ -67,58 +58,8 @@ impl Tray {
     }
 }
 
-/// 角丸の四角に "A" を載せた 32x32 RGBA を生成する。
+/// exe に埋め込んだアイコンを読む。絵の出典は `scripts/make-icon.py`。
 fn icon() -> anyhow::Result<Icon> {
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let mut put = |x: i32, y: i32, color: &[u8; 4]| {
-        let offset = ((y * SIZE + x) * 4) as usize;
-        rgba[offset..offset + 4].copy_from_slice(color);
-    };
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            if inside_rounded(x, y) {
-                put(x, y, &BG);
-            }
-        }
-    }
-
-    let ox = (SIZE - GLYPH_W * GLYPH_SCALE) / 2;
-    let oy = (SIZE - GLYPH_H * GLYPH_SCALE) / 2;
-    for (row, bits) in GLYPH.iter().enumerate() {
-        for col in 0..GLYPH_W {
-            if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
-                continue;
-            }
-            for dy in 0..GLYPH_SCALE {
-                for dx in 0..GLYPH_SCALE {
-                    put(
-                        ox + col * GLYPH_SCALE + dx,
-                        oy + row as i32 * GLYPH_SCALE + dy,
-                        &FG,
-                    );
-                }
-            }
-        }
-    }
-
-    Icon::from_rgba(rgba, SIZE as u32, SIZE as u32).context("failed to build the tray icon bitmap")
-}
-
-/// 角の外側（透明にする画素）を弾く。
-fn inside_rounded(x: i32, y: i32) -> bool {
-    let center = |v: i32| {
-        if v < RADIUS {
-            Some(RADIUS)
-        } else if v >= SIZE - RADIUS {
-            Some(SIZE - 1 - RADIUS)
-        } else {
-            None
-        }
-    };
-    let (Some(cx), Some(cy)) = (center(x), center(y)) else {
-        return true;
-    };
-    let (dx, dy) = (x - cx, y - cy);
-    dx * dx + dy * dy <= RADIUS * RADIUS
+    Icon::from_resource(ICON_ID, Some((ICON_SIZE, ICON_SIZE)))
+        .context("failed to load the embedded tray icon")
 }

@@ -34,16 +34,17 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_HIT_TEST_METRICS,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNICODE_RANGE,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory2, IDWriteFontCollection,
-    IDWriteTextFormat, IDWriteTextFormat1, IDWriteTextLayout,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory2, IDWriteTextFormat,
+    IDWriteTextFormat1, IDWriteTextLayout,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
-use windows::core::{BOOL, HRESULT, Interface as _, PCWSTR};
+use windows::core::{HRESULT, Interface as _, PCWSTR};
 use windows_numerics::Vector2;
 
 use crate::focus::as_hwnd;
 use crate::gui::Preedit;
 use crate::gui::font::FontSpec;
+use crate::gui::fontset::Fonts;
 
 /// レイアウト全体を指すテキスト範囲。
 const WHOLE: DWRITE_TEXT_RANGE = DWRITE_TEXT_RANGE {
@@ -110,6 +111,8 @@ struct Font {
 pub struct Renderer {
     target: ID2D1HwndRenderTarget,
     dwrite: IDWriteFactory2,
+    /// ファミリ名の解決先（同梱フォント + システムフォント）。
+    fonts: Fonts,
     format: IDWriteTextFormat,
     cell: CellMetrics,
     decor: Decor,
@@ -163,11 +166,13 @@ impl Renderer {
         let dwrite: IDWriteFactory2 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
             .context("DWriteCreateFactory failed")?;
 
-        let resolved = resolve_font(&dwrite, font, scale)?;
+        let fonts = Fonts::new(&dwrite)?;
+        let resolved = resolve_font(&dwrite, &fonts, font, scale)?;
 
         Ok(Self {
             target,
             dwrite,
+            fonts,
             format: resolved.format,
             cell: resolved.cell,
             decor: resolved.decor,
@@ -186,7 +191,7 @@ impl Renderer {
     /// 失敗したときは **何も変えない**（解決を先にやってから代入する）。
     /// 呼び出し側が警告を出して現状維持できるようにするため。
     pub fn set_font(&mut self, font: &FontSpec, scale: f64) -> anyhow::Result<()> {
-        let resolved = resolve_font(&self.dwrite, font, scale)?;
+        let resolved = resolve_font(&self.dwrite, &self.fonts, font, scale)?;
         self.format = resolved.format;
         self.cell = resolved.cell;
         self.decor = resolved.decor;
@@ -690,7 +695,12 @@ impl Renderer {
 /// フォントを解決してセル寸法と書式を作る。
 ///
 /// `px_size = size_pt * scale * 96 / 72`。pt からピクセルへの換算をここ 1 か所に閉じる。
-fn resolve_font(dwrite: &IDWriteFactory2, font: &FontSpec, scale: f64) -> anyhow::Result<Font> {
+fn resolve_font(
+    dwrite: &IDWriteFactory2,
+    fonts: &Fonts,
+    font: &FontSpec,
+    scale: f64,
+) -> anyhow::Result<Font> {
     let scale = scale as f32;
     if !(scale.is_finite() && scale > 0.0) {
         bail!("invalid scale factor {scale}");
@@ -700,8 +710,8 @@ fn resolve_font(dwrite: &IDWriteFactory2, font: &FontSpec, scale: f64) -> anyhow
         bail!("invalid font size {}pt at scale {scale}", font.size_pt);
     }
 
-    let (cell, decor) = measure(dwrite, &font.family, px_size, scale)?;
-    let format = make_format(dwrite, font, px_size, cell)?;
+    let (cell, decor) = measure(fonts, &font.family, px_size, scale)?;
+    let format = make_format(dwrite, fonts, font, px_size, cell)?;
     Ok(Font {
         format,
         cell,
@@ -711,29 +721,17 @@ fn resolve_font(dwrite: &IDWriteFactory2, font: &FontSpec, scale: f64) -> anyhow
 
 /// primary family の実体からセル寸法と装飾位置を割り出す。
 ///
-/// フォントが入っていなければ既定へ落とさず `Err`。黙って別のフォントで描くと、
+/// フォントが無ければ既定へ落とさず `Err`。黙って別のフォントで描くと、
 /// `guifont` が効いていないことに利用者が気づけない（`font.rs` と同じ掟）。
 fn measure(
-    dwrite: &IDWriteFactory2,
+    fonts: &Fonts,
     family: &str,
     px_size: f32,
     scale: f32,
 ) -> anyhow::Result<(CellMetrics, Decor)> {
-    let mut collection: Option<IDWriteFontCollection> = None;
-    // SAFETY: 出力先はローカル変数。checkforupdates は false（毎回の再走査は不要）。
-    unsafe { dwrite.GetSystemFontCollection(&mut collection, false) }
-        .context("GetSystemFontCollection failed")?;
-    let collection = collection.context("the system font collection is unavailable")?;
-
-    let name = wide_nul(family);
-    let mut index = 0u32;
-    let mut exists = BOOL(0);
-    // SAFETY: name は NUL 終端の生存スライス。index と exists はローカル変数。
-    unsafe { collection.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists) }
-        .context("FindFamilyName failed")?;
-    if !exists.as_bool() {
-        bail!("font family {family:?} is not installed");
-    }
+    let (collection, index) = fonts
+        .find(family)
+        .with_context(|| format!("font family {family:?} is not available"))?;
 
     // SAFETY: index は FindFamilyName が返した実在するファミリの添字。
     let font_family = unsafe { collection.GetFontFamily(index) }.context("GetFontFamily failed")?;
@@ -815,20 +813,25 @@ fn measure(
 /// （レイアウトが勝手にベースラインを決めない）。
 fn make_format(
     dwrite: &IDWriteFactory2,
+    fonts: &Fonts,
     font: &FontSpec,
     px_size: f32,
     cell: CellMetrics,
 ) -> anyhow::Result<IDWriteTextFormat> {
+    let (collection, _) = fonts
+        .find(&font.family)
+        .with_context(|| format!("font family {:?} is not available", font.family))?;
     let family = wide_nul(&font.family);
     // ロケールは空文字列＝システム既定。日本語環境では ja-JP が使われ、
     // 漢字の字形が中国語圏の異体字にならない。ここで決め打ちにはしない。
     let locale = wide_nul("");
-    // SAFETY: family と locale は NUL 終端の生存スライス。コレクションは None
-    // （システムフォント）。残りは列挙値と数値。
+    // SAFETY: family と locale は NUL 終端の生存スライス。コレクションは
+    // `Fonts::find` がそのファミリを見つけた側（同梱またはシステム）。
+    // 残りは列挙値と数値。
     let format = unsafe {
         dwrite.CreateTextFormat(
             PCWSTR(family.as_ptr()),
-            None::<&IDWriteFontCollection>,
+            collection,
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
@@ -854,54 +857,66 @@ fn make_format(
             .context("SetLineSpacing failed")?;
     }
 
-    install_fallback(dwrite, &format, font)?;
+    install_fallback(dwrite, fonts, &format, font)?;
     Ok(format)
 }
 
 /// `FontSpec::fallback_chain` を DirectWrite のフォントフォールバックに積む。
 ///
 /// `CreateTextFormat` はカンマ区切りのファミリ列を解釈しないので、鎖はここで分解する。
-/// 全 Unicode を鎖（利用者指定 → `MS Gothic`）へ写す 1 本のマッピングを置き、その後に
-/// システム既定のフォールバックを足す。**鎖の先頭に primary を入れてある**ので、
-/// 「フォールバックが基底フォントより先に引かれるか」という DirectWrite の仕様の
-/// 曖昧さに結果が左右されない。指定フォントが持つ文字は必ず指定フォントで出る。
+/// 全 Unicode を鎖の各ファミリ（利用者指定 → 同梱フォント）へ写すマッピングを
+/// **ファミリごとに 1 本ずつ** 順に積み、最後にシステム既定のフォールバックを足す。
+/// 1 本にまとめられないのは、`AddMapping` がコレクションを 1 つしか取らないためで、
+/// 同梱フォントとシステムフォントは別コレクションに属する。
+///
+/// **鎖の先頭に primary を入れてある**ので、「フォールバックが基底フォントより先に
+/// 引かれるか」という DirectWrite の仕様の曖昧さに結果が左右されない。指定フォントが
+/// 持つ文字は必ず指定フォントで出る。
+///
+/// 鎖の途中に「入っていないファミリ」があれば黙って飛ばさず `Err`。
 fn install_fallback(
     dwrite: &IDWriteFactory2,
+    fonts: &Fonts,
     format: &IDWriteTextFormat,
     font: &FontSpec,
 ) -> anyhow::Result<()> {
     let chain = font.fallback_chain();
-    let names: Vec<Vec<u16>> = chain
+    let names: Vec<&str> = chain
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(wide_nul)
         .collect();
     if names.is_empty() {
         bail!("the font fallback chain for {:?} is empty", font.family);
     }
-    let pointers: Vec<*const u16> = names.iter().map(|name| name.as_ptr()).collect();
     let ranges = [DWRITE_UNICODE_RANGE {
         first: 0,
         last: 0x0010_FFFF,
     }];
 
-    // SAFETY: builder は直後に使い切るローカル。ranges と pointers（およびその
-    // 指す names）は AddMapping の呼び出し中ずっと生きている。
+    // SAFETY: builder は直後に使い切るローカル。ranges と wide（およびその
+    // ポインタ）は AddMapping の呼び出し中ずっと生きている。
     let fallback = unsafe {
         let builder = dwrite
             .CreateFontFallbackBuilder()
             .context("CreateFontFallbackBuilder failed")?;
-        builder
-            .AddMapping(
-                &ranges,
-                &pointers,
-                None::<&IDWriteFontCollection>,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                1.0,
-            )
-            .context("AddMapping failed")?;
+        for name in names {
+            let (collection, _) = fonts
+                .find(name)
+                .with_context(|| format!("font family {name:?} is not available"))?;
+            let wide = wide_nul(name);
+            let pointers = [wide.as_ptr()];
+            builder
+                .AddMapping(
+                    &ranges,
+                    &pointers,
+                    collection,
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    1.0,
+                )
+                .context("AddMapping failed")?;
+        }
         let system = dwrite
             .GetSystemFontFallback()
             .context("GetSystemFontFallback failed")?;

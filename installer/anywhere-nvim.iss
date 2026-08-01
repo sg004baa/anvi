@@ -36,6 +36,11 @@ SolidCompression=yes
 OutputDir=..\dist
 OutputBaseFilename=anywhere-nvim-v{#AppVersion}-windows-x64-setup
 WizardStyle=modern
+; exe に埋め込んでいるものと同じアイコン（出典は scripts/make-icon.py）。
+SetupIconFile=..\assets\anywhere-nvim.ico
+; デュアルライセンスなので、ウィザードでは MIT を出し、Apache-2.0 は
+; インストール先（{app}\LICENSE-APACHE）に置く。
+LicenseFile=..\LICENSE-MIT
 
 [Tasks]
 Name: "startup"; Description: "Windows へのサインイン時に自動起動する"; GroupDescription: "常駐:"
