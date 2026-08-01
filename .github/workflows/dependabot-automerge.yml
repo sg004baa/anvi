@@ -1,0 +1,27 @@
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# 必要な設定（コードでは表現できない）:
+#   Settings → General → Allow auto-merge を ON にする
+#   main のブランチ保護で ci.yml の 3 ジョブを required status checks に指定する
+# 後者を忘れると --auto が「チェックを待たずに即マージ」になる。
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dependabot/fetch-metadata@v3
+        id: meta
+        with:
+          github-token: ${{ github.token }}
+      # major はビルドが通っても意味論が変わりうるので手で見る。
+      - if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"

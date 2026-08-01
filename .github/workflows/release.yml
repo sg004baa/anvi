@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # 同梱する nvim。ci.yml のテスト用と揃えること。
+  NVIM_VERSION: v0.12.4
+
+jobs:
+  verify-version:
+    name: tag == Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # 食い違ったまま先へ進むと、中身が別バージョンの release が出来上がる。
+      - name: compare the tag with the crate version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "anywhere-nvim") | .version')"
+          echo "tag=$tag crate=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the crate version $crate"
+            exit 1
+          fi
+
+  build-and-publish:
+    name: build + release
+    needs: verify-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: rhysd/action-setup-vim@v1
+        id: nvim
+        with:
+          neovim: true
+          version: ${{ env.NVIM_VERSION }}
+
+      - run: cargo test --workspace --locked
+        env:
+          ANYWHERE_TEST_NVIM: ${{ steps.nvim.outputs.executable }}
+
+      - run: cargo build --release --locked -p anywhere-nvim
+
+      # 同梱する nvim は「テストに使ったもの」ではなく、配布物として毎回取り直す。
+      - name: fetch nvim-win64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o nvim-win64.zip \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-win64.zip"
+          unzip -q nvim-win64.zip
+          test -f nvim-win64/bin/nvim.exe
+
+      # レイアウトの正は scripts/make-bundle.sh。ここで手で並べると必ずずれる。
+      - name: stage the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/anywhere-nvim
+          cp target/release/anywhere-nvim.exe dist/anywhere-nvim/
+          scripts/make-bundle.sh nvim-win64 dist/anywhere-nvim
+
+      # 「起動はするが契約だけ死んでいる」バンドルを出さないための最終確認。
+      # 常駐に成功すると bundle 解決・nvim 起動・ui_attach・トレイ・ホットキー登録が
+      # 全部通っている。
+      - name: smoke the staged bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $log = "dist\host.log"
+          $proc = Start-Process -FilePath "dist\anywhere-nvim\anywhere-nvim.exe" `
+            -RedirectStandardError $log -WindowStyle Hidden -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            $resident = $false
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 2
+              if ($proc.HasExited) { break }
+              if ((Test-Path $log) -and (Select-String -Path $log -Pattern "anywhere-nvim is resident" -Quiet)) {
+                $resident = $true
+                break
+              }
+            }
+            if (-not $resident) {
+              if (Test-Path $log) { Get-Content $log }
+              throw "the staged bundle did not become resident"
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+            Get-Process nvim -ErrorAction SilentlyContinue | Stop-Process -Force
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="anywhere-nvim-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
+          (cd dist && 7z a -tzip "../${name}.zip" anywhere-nvim > /dev/null)
+          sha256sum "${name}.zip" > "${name}.zip.sha256"
+          echo "zip=${name}.zip" >> "$GITHUB_OUTPUT"
+          echo "sha=${name}.zip.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: create the github release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${{ steps.package.outputs.zip }}" \
+            "${{ steps.package.outputs.sha }}"
