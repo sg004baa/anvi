@@ -32,6 +32,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 global-hotkey = "0.8.0"
 tray-icon = "0.24.2"
 windows = "0.62.2"
+windows-numerics = "0.3.1"
+winit = "0.30.13"
+raw-window-handle = "0.6.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

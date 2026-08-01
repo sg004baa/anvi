@@ -2,7 +2,7 @@
 //!
 //! UI もホットキーも UIA も持たない。常駐 nvim を起こしてセッションを 1 本張り、
 //! 状態契約（保存されたか）に従って結果を標準出力へ吐く。UI クライアント
-//! （Neovide / `nvim --server <addr> --remote-ui`）は手で繋ぐ。
+//! （`nvim --server <addr> --remote-ui` など）は手で繋ぐ。
 //!
 //! ```text
 //! cargo run -p anywhere-core --example step1 -- <nvim 実行ファイル> [初期テキスト]
@@ -40,7 +40,10 @@ async fn main() -> anyhow::Result<()> {
         appname: "anywhere-nvim".to_owned(),
     };
 
-    let (mut server, mut events) = NvimServer::spawn(&cfg).await?;
+    // UI クライアントとしてはアタッチしない（このサンプルは状態契約だけを見る）。
+    // `redraw` の受け口は落としてよく、サーバ側は debug ログを出して捨てる。
+    let (mut server, handles) = NvimServer::spawn(&cfg).await?;
+    let mut events = handles.host;
     let mut session = Session::default();
 
     let original = text::to_lines(&initial);

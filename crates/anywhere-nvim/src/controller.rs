@@ -1,37 +1,47 @@
 //! セッション状態機械を持つスレッド（DESIGN 6、11.2、付録 B）。
 //!
-//! `Session` はこのスレッドだけが触る。メッセージポンプ（トレイ / ホットキー）と
-//! UIA の MTA スレッドとは `Cmd` / `Uia` のチャンネル越しにしか繋がらない。
+//! `Session` と nvim の RPC はこのスレッドだけが触る。GUI（winit のループが回る
+//! main スレッド）とは `Cmd` で、UIA の MTA スレッドとは `Uia` で、それぞれ
+//! チャンネル越しにしか繋がらない。逆向き（コントローラ → GUI）は
+//! [`EventLoopProxy`] に載せた [`UserEvent`]。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
-use anyhow::Context as _;
+use anyhow::{Context as _, anyhow};
 use anywhere_core::{Applied, HostEvent, NvimConfig, NvimServer, Phase, Session};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
+use winit::event_loop::EventLoopProxy;
 
 use crate::bundle::{APPNAME, Bundle};
-use crate::editor::Editor;
 use crate::focus;
+use crate::gui::{DEFAULT_GRID, UserEvent};
 use crate::uia::Uia;
 
-/// コントローラへの指令。ポンプスレッド / Neovide ウォッチャ / RPC 転送タスクから届く。
+/// コントローラへの指令。GUI スレッドと RPC 転送タスクから届く。
 #[derive(Debug)]
 pub enum Cmd {
     Hotkey,
     Exit,
-    /// Neovide が使えなくなった（プロセス終了・ウィンドウ消滅）。理由をそのまま記録する。
-    EditorLost(&'static str),
     Host(HostEvent),
+    /// GUI からのキー入力（既に nvim 記法）。
+    Input(String),
+    /// ウィンドウのサイズが変わった。
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    /// ウィンドウの × が押された。`AwQuit` と同じ扱い。
+    CloseRequested,
 }
 
-/// nvim と Neovide の組（DESIGN 付録 C「ペア」）。
+/// nvim との接続一式。RPC は 1 本で、host イベントと UI の `redraw` が相乗りする。
 pub struct Pair {
     pub nvim: NvimServer,
     pub host_rx: UnboundedReceiver<HostEvent>,
-    pub editor: Editor,
+    pub redraw_rx: UnboundedReceiver<Vec<rmpv::Value>>,
 }
 
 /// コントローラスレッドに渡す一切。
@@ -42,25 +52,35 @@ pub struct Boot {
     pub rx: Receiver<Cmd>,
     pub uia: Uia,
     pub pair: Pair,
+    /// GUI へ「出せ」「隠せ」「前面へ」を伝える経路。
+    pub proxy: EventLoopProxy<UserEvent>,
     /// 意図的シャットダウン中の印。リカバリの誤発火を抑止する（DESIGN 6.3）。
     pub shutting_down: Arc<AtomicBool>,
 }
 
-/// ペアを起こす。nvim を起動するのは host の責務であり Neovide ではない（DESIGN 3.2）。
-pub fn spawn_pair(bundle: &Bundle, rt: &Handle, tx: &Sender<Cmd>) -> anyhow::Result<Pair> {
+/// nvim を起こして UI としても繋ぐ。
+///
+/// `ui_attach` までここでやる。attach していない nvim は 1 バイトも描かないので、
+/// 「起動はしたが画面が真っ白」を作らないためにペアの生成と不可分にしておく。
+pub fn spawn_pair(bundle: &Bundle, rt: &Handle) -> anyhow::Result<Pair> {
     let cfg = NvimConfig {
         nvim_exe: bundle.nvim_exe.clone(),
         runtime_dir: bundle.runtime_dir.clone(),
         appname: APPNAME.to_owned(),
     };
-    let (nvim, host_rx) = rt
+    let (nvim, handles) = rt
         .block_on(NvimServer::spawn(&cfg))
         .context("failed to start the nvim server")?;
-    let editor = Editor::spawn(&bundle.neovide_exe, nvim.port(), tx.clone())?;
+    let (cols, rows) = DEFAULT_GRID;
+    rt.block_on(nvim.attach_ui(cols, rows))
+        .context("failed to attach the ui")?;
+    // ポートは実機での調査に要る（`nvim --server 127.0.0.1:PORT --remote-send` で
+    // 中の nvim を直接叩ける）。info で出しておく。
+    tracing::info!(port = nvim.port(), cols, rows, "nvim is up and attached");
     Ok(Pair {
         nvim,
-        host_rx,
-        editor,
+        host_rx: handles.host,
+        redraw_rx: handles.redraw,
     })
 }
 
@@ -73,25 +93,27 @@ pub fn start(boot: Boot) -> anyhow::Result<std::thread::JoinHandle<()>> {
         rx,
         uia,
         pair,
+        proxy,
         shutting_down,
     } = boot;
     let Pair {
         nvim,
         host_rx,
-        editor,
+        redraw_rx,
     } = pair;
 
     let generation = Arc::new(AtomicU64::new(0));
     forward(&rt, host_rx, tx.clone(), 0, Arc::clone(&generation));
+    pump_redraw(&rt, redraw_rx, proxy.clone(), 0, Arc::clone(&generation));
 
     let mut controller = Controller {
         bundle,
         rt,
         tx,
         uia,
+        proxy,
         session: Session::default(),
         nvim,
-        editor,
         target_hwnd: 0,
         shutting_down,
         generation,
@@ -107,9 +129,9 @@ struct Controller {
     rt: Handle,
     tx: Sender<Cmd>,
     uia: Uia,
+    proxy: EventLoopProxy<UserEvent>,
     session: Session,
     nvim: NvimServer,
-    editor: Editor,
     /// 書き戻し先ウィンドウ（DESIGN 6.2 手順 2 / 11）。
     target_hwnd: isize,
     shutting_down: Arc<AtomicBool>,
@@ -123,7 +145,9 @@ impl Controller {
             match cmd {
                 Cmd::Hotkey => self.on_hotkey(),
                 Cmd::Host(event) => self.on_host(event),
-                Cmd::EditorLost(why) => self.recover(why),
+                Cmd::Input(keys) => self.on_input(&keys),
+                Cmd::Resize { cols, rows } => self.on_resize(cols, rows),
+                Cmd::CloseRequested => self.on_close_requested(),
                 Cmd::Exit => {
                     self.teardown();
                     return;
@@ -140,11 +164,7 @@ impl Controller {
     fn on_hotkey(&mut self) {
         match self.session.phase() {
             // 既存セッションへ戻すだけ（DESIGN 6.1）。
-            Phase::Editing => {
-                if let Err(err) = self.editor.focus() {
-                    tracing::error!(%err, "cannot focus the neovide window");
-                }
-            }
+            Phase::Editing => self.notify_gui(UserEvent::Focus),
             Phase::Idle => {
                 if let Err(err) = self.begin_session() {
                     tracing::error!(%err, "cannot start a session");
@@ -156,19 +176,6 @@ impl Controller {
     }
 
     fn begin_session(&mut self) -> anyhow::Result<()> {
-        // Neovide のウィンドウを × で閉じると、実機では **プロセスは生き残り HWND だけが
-        // 消える**。通常はウォッチャが先に気付いて作り直すが、押下と同時だと間に合わない。
-        // ここでペアを作り直したうえで **この押下は捨てる**。作り直しの直後は新しい
-        // Neovide がフォーカスを持ち去るため、そのまま capture すると編集対象を取り違える
-        // （DESIGN 4.3 で却下した案と同じ事故）。
-        if !self.editor.window_is_alive() {
-            tracing::warn!(
-                "the neovide window vanished; restarting the pair and dropping this press"
-            );
-            self.recover("neovide window vanished");
-            return Ok(());
-        }
-
         let foreground = focus::foreground_window();
         if !self.session.begin_capture() {
             tracing::debug!("capture already in flight");
@@ -198,8 +205,7 @@ impl Controller {
             "captured"
         );
 
-        // filetype は v1 では指定しない。見た目とオプションはローカル設定の領分
-        // （DESIGN 5.4）。
+        // filetype は指定しない。見た目とオプションはローカル設定の領分（DESIGN 5.4）。
         if let Err(err) = self
             .rt
             .block_on(self.nvim.start_session(&captured.lines, None))
@@ -211,10 +217,10 @@ impl Controller {
         self.target_hwnd = captured.hwnd;
         self.session.begin_edit(captured.lines);
 
-        if let Err(err) = self.editor.show_and_focus() {
+        if let Err(err) = self.proxy.send_event(UserEvent::Show) {
             // 画面が出ないなら編集できない。掴んだセッションを畳んで Idle へ戻す。
             self.session.reset();
-            return Err(err.context("cannot show the neovide window"));
+            return Err(anyhow!("the gui event loop is gone: {err}"));
         }
         Ok(())
     }
@@ -235,6 +241,31 @@ impl Controller {
         }
     }
 
+    /// GUI から届いたキー入力をそのまま nvim へ。
+    fn on_input(&mut self, keys: &str) {
+        if let Err(err) = self.rt.block_on(self.nvim.input(keys)) {
+            tracing::error!(%err, keys, "nvim_input failed");
+        }
+    }
+
+    fn on_resize(&mut self, cols: u16, rows: u16) {
+        if let Err(err) = self.rt.block_on(self.nvim.try_resize(cols, rows)) {
+            tracing::error!(%err, cols, rows, "nvim_ui_try_resize failed");
+        }
+    }
+
+    /// ウィンドウの ×。破棄の意味論は `ZQ` と同じで、書き戻しは起きない。
+    fn on_close_requested(&mut self) {
+        let phase = self.session.phase();
+        if phase != Phase::Editing {
+            tracing::debug!(?phase, "close requested outside of a session");
+            return;
+        }
+        if let Err(err) = self.rt.block_on(self.nvim.quit_session()) {
+            tracing::error!(%err, "AwQuit failed");
+        }
+    }
+
     fn finish_session(&mut self) {
         let phase = self.session.phase();
         if phase != Phase::Editing {
@@ -242,9 +273,7 @@ impl Controller {
             return;
         }
 
-        if let Err(err) = self.editor.hide() {
-            tracing::error!(%err, "cannot hide the neovide window");
-        }
+        self.notify_gui(UserEvent::Hide);
         let restored = focus::set_foreground(self.target_hwnd);
         let applied = self.session.on_end();
         if let Err(err) = restored {
@@ -271,7 +300,7 @@ impl Controller {
             tracing::debug!(why, "recovery suppressed while shutting down");
             return;
         }
-        tracing::warn!(why, "restarting the nvim + neovide pair");
+        tracing::warn!(why, "restarting nvim");
         if let Err(err) = self.restart_pair() {
             tracing::error!(%err, "pair restart failed; the host can no longer edit");
         }
@@ -283,14 +312,13 @@ impl Controller {
         // タスクをここで黙らせないと、再起動が無限に連鎖する。
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
-        if let Err(err) = self.editor.kill() {
-            tracing::warn!(%err, "could not kill the old neovide");
-        }
         if let Err(err) = self.rt.block_on(self.nvim.shutdown()) {
             tracing::warn!(%err, "could not shut down the old nvim");
         }
 
-        let pair = spawn_pair(&self.bundle, &self.rt, &self.tx)?;
+        // `spawn_pair` が `ui_attach` までやり直す。GUI は新しいグリッドを
+        // 最初の `grid_resize` で受け取る。
+        let pair = spawn_pair(&self.bundle, &self.rt)?;
         forward(
             &self.rt,
             pair.host_rx,
@@ -298,27 +326,36 @@ impl Controller {
             generation,
             Arc::clone(&self.generation),
         );
+        pump_redraw(
+            &self.rt,
+            pair.redraw_rx,
+            self.proxy.clone(),
+            generation,
+            Arc::clone(&self.generation),
+        );
         self.nvim = pair.nvim;
-        // `Editor::spawn` が起動時の待避（画面外 + SW_HIDE）まで済ませている。
-        self.editor = pair.editor;
         self.target_hwnd = 0;
         self.session.reset();
+        // 編集中に落ちた場合はウィンドウが出たままなので引っ込める。
+        self.notify_gui(UserEvent::Hide);
         tracing::info!(generation, "pair restarted");
         Ok(())
     }
 
-    /// 意図的シャットダウン。`shutting_down` はポンプ側が `Cmd::Exit` より先に
-    /// 立てているため、ここで生じる切断・プロセス終了はリカバリを誘発しない
-    /// （DESIGN 6.3 誤発火）。
+    /// 意図的シャットダウン。`shutting_down` は GUI 側が `Cmd::Exit` より先に
+    /// 立てているため、ここで生じる切断はリカバリを誘発しない（DESIGN 6.3 誤発火）。
     fn teardown(&mut self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Err(err) = self.editor.kill() {
-            tracing::warn!(%err, "could not kill neovide during shutdown");
-        }
         if let Err(err) = self.rt.block_on(self.nvim.shutdown()) {
             tracing::warn!(%err, "could not shut down nvim during shutdown");
         }
         tracing::info!("pair torn down");
+    }
+
+    fn notify_gui(&self, event: UserEvent) {
+        if let Err(err) = self.proxy.send_event(event) {
+            tracing::error!(%err, "the gui event loop is gone; event dropped");
+        }
     }
 }
 
@@ -339,6 +376,31 @@ fn forward(
                 return;
             }
             if tx.send(Cmd::Host(event)).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// `redraw` バッチを GUI スレッドへ流す（tokio ランタイム上のタスク）。
+///
+/// パースはしない。UI 状態への適用は winit のループの中でやる（`redraw` は毎打鍵
+/// 飛んでくるので、RPC の io タスクを重くしない）。世代の扱いは [`forward`] と同じ。
+fn pump_redraw(
+    rt: &Handle,
+    mut redraw_rx: UnboundedReceiver<Vec<rmpv::Value>>,
+    proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
+    current: Arc<AtomicU64>,
+) {
+    rt.spawn(async move {
+        while let Some(batch) = redraw_rx.recv().await {
+            if current.load(Ordering::SeqCst) != generation {
+                tracing::debug!(generation, "redraw from a superseded pair dropped");
+                return;
+            }
+            if proxy.send_event(UserEvent::Redraw(batch)).is_err() {
+                tracing::debug!("the gui event loop is gone; redraw pump stopped");
                 return;
             }
         }

@@ -1,7 +1,7 @@
 //! ステップ 1 の受け入れ条件（DESIGN §12）を実 nvim に対して検証する。
 //!
-//! カバーするのは項目 1 / 2 / 4 / 5 / 6。項目 3（Neovide のアタッチ）と
-//! 項目 7（Neovide を × で閉じる）は GUI が要るため実機確認に残す。
+//! カバーするのは項目 1 / 2 / 4 / 5 / 6。項目 3（UI クライアントのアタッチ）と
+//! 項目 7（ウィンドウを × で閉じる）は GUI が要るため実機確認に残す。
 //!
 //! nvim は `ANYWHERE_TEST_NVIM` が指す実行ファイル、無ければ PATH 上の `nvim`。
 //! どちらも起動できなければテストは失敗する（スキップしない）。
@@ -16,7 +16,7 @@ use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// host とは別チャンネルで nvim に繋ぐ検証用クライアント（Neovide と同じ立場）。
+/// host とは別チャンネルで nvim に繋ぐ検証用クライアント。
 type Client = nvim_rs::Neovim<nvim_rs::compat::tokio::Compat<WriteHalf<TcpStream>>>;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,13 +65,13 @@ async fn start(appname: &str) -> (NvimServer, UnboundedReceiver<HostEvent>, Clie
         runtime_dir: runtime_dir(),
         appname: appname.to_owned(),
     };
-    let (server, events) = NvimServer::spawn(&cfg)
+    let (server, handles) = NvimServer::spawn(&cfg)
         .await
         .unwrap_or_else(|e| panic!("failed to spawn {}: {e:#}", cfg.nvim_exe.display()));
     let (client, _io) = nvim_rs::create::tokio::new_tcp(("127.0.0.1", server.port()), Dummy::new())
         .await
         .expect("connect the verification client to nvim");
-    (server, events, client)
+    (server, handles.host, client)
 }
 
 async fn start_session(server: &NvimServer, lines: &[String]) {

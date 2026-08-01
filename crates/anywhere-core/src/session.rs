@@ -42,7 +42,7 @@ impl Session {
     }
 
     /// `Idle` -> `Capturing`。`Idle` 以外では何も変えずに false を返す
-    /// （編集中のホットキーは Neovide のフォーカスだけを担当する）。
+    /// （編集中のホットキーはエディタウィンドウのフォーカスだけを担当する）。
     pub fn begin_capture(&mut self) -> bool {
         if self.phase != Phase::Idle {
             return false;

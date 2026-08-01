@@ -1,12 +1,18 @@
 //! トレイアイコン（DESIGN 12 章ステップ 2）。
 //!
 //! メニューは `Exit` の 1 項目だけ。設定 GUI は v1 のスコープ外（DESIGN 2）。
-//! `tray-icon` は内部で隠しウィンドウを作るため、メッセージポンプスレッドで
-//! 生成すること。
+//! `tray-icon` は内部で隠しウィンドウを作るため、winit のループが回るスレッド
+//! （= main スレッド）で生成すること。
+//!
+//! イベントはポーリングしない。`muda` / `tray-icon` は「ハンドラ未設定なら無制限
+//! チャンネルに積む」実装なので、汲まない経路を残すとアイコン上のマウス移動だけで
+//! メモリが増え続ける。両方にハンドラを付けて塞ぐ。
 
 use anyhow::Context as _;
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+use crate::gui::{ProxyHandle, UserEvent};
 
 const EXIT_ID: &str = "anywhere.exit";
 
@@ -28,15 +34,27 @@ const GLYPH_SCALE: i32 = 4;
 pub struct Tray {
     /// 生かしておく必要がある。drop するとアイコンが消える。
     _icon: TrayIcon,
-    exit_id: MenuId,
 }
 
 impl Tray {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(proxy: ProxyHandle) -> anyhow::Result<Self> {
         let exit = MenuItem::with_id(EXIT_ID, "Exit", true, None);
         let menu = Menu::new();
         menu.append(&exit)
             .context("failed to build the tray menu")?;
+        let exit_id = exit.into_id();
+
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if event.id == exit_id {
+                proxy.send(UserEvent::Quit);
+            } else {
+                tracing::debug!(id = %event.id.0, "unknown menu item");
+            }
+        }));
+        // クリックにもホバーにも用は無い。溜めないためだけに受け取る。
+        TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
+            tracing::trace!(?event, "tray icon event ignored");
+        }));
 
         let icon = TrayIconBuilder::new()
             .with_tooltip("anywhere-nvim")
@@ -45,24 +63,7 @@ impl Tray {
             .build()
             .context("failed to create the tray icon")?;
 
-        Ok(Self {
-            _icon: icon,
-            exit_id: exit.into_id(),
-        })
-    }
-
-    /// 溜まっているメニューイベントを吐き出す。`Exit` が押されていれば `true`。
-    /// `DispatchMessageW` の直後に呼ぶ。
-    pub fn exit_requested(&self) -> bool {
-        let mut requested = false;
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.exit_id {
-                requested = true;
-            } else {
-                tracing::debug!(id = %event.id.0, "unknown menu item");
-            }
-        }
-        requested
+        Ok(Self { _icon: icon })
     }
 }
 

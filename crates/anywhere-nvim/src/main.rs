@@ -2,7 +2,10 @@
 //!
 //! スレッドモデル（DESIGN 11.2）。COM のアパートメント地雷を踏まないよう最初から分ける。
 //!
-//! - main スレッド: Win32 メッセージポンプ。トレイ / グローバルホットキー / `SetWinEventHook`
+//! - main スレッド: winit のイベントループ。編集ウィンドウの描画・キーボード・IME に
+//!   加え、トレイとグローバルホットキーの隠しウィンドウのメッセージもここで汲まれる
+//!   （どちらも「登録したスレッドでループが回っていること」を要求するので、
+//!   [`gui::run`] を呼ぶ直前に main スレッドで作る）
 //! - `uia` の MTA スレッド: UI Automation の一切
 //! - `controller` スレッド: `Session` の所有と RPC 呼び出し
 //! - tokio ランタイム: nvim との msgpack-rpc
@@ -13,8 +16,8 @@ compile_error!("anywhere-nvim targets Windows 11 only");
 mod bundle;
 mod clipboard;
 mod controller;
-mod editor;
 mod focus;
+mod gui;
 mod hotkey;
 mod keys;
 mod tray;
@@ -22,15 +25,13 @@ mod uia;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 
 use anyhow::{Context as _, anyhow};
 use tracing_subscriber::EnvFilter;
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, TranslateMessage,
-};
+use winit::event_loop::EventLoop;
 
 use controller::Cmd;
+use gui::UserEvent;
 
 /// `RUST_LOG` が無いときのログレベル。設定の既定値ではなくコード上のリテラル。
 const DEFAULT_LOG: &str = "info";
@@ -44,10 +45,17 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("failed to build the tokio runtime")?;
 
+    // イベントループはウィンドウより先に要る。proxy はここでしか作れないので、
+    // トレイ・ホットキー・コントローラのどれよりも先に用意する。
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .context("failed to create the winit event loop")?;
+    let proxy = event_loop.create_proxy();
+
     let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
 
-    // 3 プロセスすべてがアプリ起動時に立ち上がり、終了まで生き続ける（DESIGN 3.1）。
-    let pair = controller::spawn_pair(&bundle, rt.handle(), &tx)?;
+    // nvim はアプリ起動時に立ち上がり、終了まで生き続ける（DESIGN 3.1）。
+    let pair = controller::spawn_pair(&bundle, rt.handle())?;
     let uia = uia::Uia::start().context("failed to start the UI Automation thread")?;
 
     let shutting_down = Arc::new(AtomicBool::new(false));
@@ -58,65 +66,36 @@ fn main() -> anyhow::Result<()> {
         rx,
         uia,
         pair,
+        proxy: proxy.clone(),
         shutting_down: Arc::clone(&shutting_down),
     })?;
 
-    // ここから先は main スレッドをメッセージポンプ専用にする。トレイとホットキーは
-    // 登録したスレッドでループが回っていることを要求するため、この順序が必須。
-    let tray = tray::Tray::new()?;
-    let hotkeys = hotkey::Hotkeys::register()?;
+    let tray = tray::Tray::new(gui::ProxyHandle::new(proxy.clone()))?;
+    let hotkeys = hotkey::Hotkeys::register(gui::ProxyHandle::new(proxy))?;
     tracing::info!("anywhere-nvim is resident");
 
-    pump(&tx, &tray, &hotkeys);
+    // ここから先は main スレッドを winit が占有する。戻るのは終了時だけ。
+    let boot = gui::GuiBoot {
+        tx: tx.clone(),
+        tray,
+        hotkeys,
+    };
+    let result = gui::run(event_loop, boot);
 
-    // ポンプが止まったら理由に関わらず終了する。フラグはコントローラがペアを
-    // 畳むより先に立てる。これより後に起きる RPC 切断と Neovide の終了で
-    // リカバリが誤発火してはならない（DESIGN 6.3）。
+    // ループが止まったら理由に関わらず終了する。フラグはコントローラがペアを
+    // 畳むより先に立てる。これより後に起きる RPC 切断でリカバリが誤発火しては
+    // ならない（DESIGN 6.3）。
     shutting_down.store(true, Ordering::SeqCst);
     if tx.send(Cmd::Exit).is_err() {
         tracing::error!("controller is already gone");
     }
-    // 転送タスクとウォッチャが持つ複製とは別に、こちらの送信端は手放しておく。
+    // 転送タスクが持つ複製とは別に、こちらの送信端は手放しておく。
     drop(tx);
     controller
         .join()
         .map_err(|_| anyhow!("the controller thread panicked"))?;
     tracing::info!("anywhere-nvim stopped");
-    Ok(())
-}
-
-/// Win32 メッセージポンプ。トレイと `global-hotkey` の隠しウィンドウはこのループで動く。
-///
-/// イベントは `DispatchMessageW` の中で各クレートのチャンネルへ積まれるので、
-/// ディスパッチ直後に吸い出す。
-fn pump(tx: &Sender<Cmd>, tray: &tray::Tray, hotkeys: &hotkey::Hotkeys) {
-    let mut msg = MSG::default();
-    loop {
-        // SAFETY: msg は有効なローカル変数。フィルタ無しでこのスレッドのキューから取る。
-        match unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 {
-            0 => {
-                tracing::debug!("WM_QUIT received");
-                return;
-            }
-            -1 => {
-                tracing::error!(err = %windows::core::Error::from_thread(), "GetMessageW failed");
-                return;
-            }
-            _ => {}
-        }
-        // SAFETY: msg は直前に取得した有効なメッセージ。
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        hotkeys.drain(tx);
-
-        if tray.exit_requested() {
-            tracing::info!("exit requested from the tray");
-            return;
-        }
-    }
+    result
 }
 
 fn init_tracing() -> anyhow::Result<()> {

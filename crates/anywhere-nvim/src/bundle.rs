@@ -1,7 +1,7 @@
 //! 同梱物のレイアウト解決（DESIGN 5.3）。
 //!
 //! 探索パスは持たない。`current_exe()` の隣に固定レイアウトで置かれている前提で、
-//! 無ければその場で落ちる。システムにインストールされた nvim / neovide を拾うと
+//! 無ければその場で落ちる。システムにインストールされた nvim を拾うと
 //! 「なぜかユーザーの設定が読まれる」という最悪の事故になるため（DESIGN 5.2）。
 //!
 //! ```text
@@ -10,7 +10,6 @@
 //! runtime/lua/anywhere/init.lua
 //! nvim/bin/nvim.exe
 //! nvim/share/nvim/runtime/   (同梱 nvim 自身の runtime。exe 相対で解決される)
-//! neovide/neovide.exe
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -26,7 +25,6 @@ pub struct Bundle {
     /// 同梱 lua ツリーの根。`init.lua` と `lua/anywhere/` を含む（`NvimConfig::runtime_dir`）。
     pub runtime_dir: PathBuf,
     pub nvim_exe: PathBuf,
-    pub neovide_exe: PathBuf,
 }
 
 /// 実行ファイルの隣から同梱物を解決する。
@@ -47,13 +45,10 @@ pub fn resolve() -> anyhow::Result<Bundle> {
     // nvim は exe の隣（../share/nvim/runtime）から自分の runtime を探す。無いと
     // syntax.vim すら開けず、原因が分かりにくい E484 だけが出る。
     require_dir(&root.join("nvim").join("share").join("nvim").join("runtime"))?;
-    let neovide_exe = root.join("neovide").join("neovide.exe");
-    require_file(&neovide_exe)?;
 
     Ok(Bundle {
         runtime_dir,
         nvim_exe,
-        neovide_exe,
     })
 }
 

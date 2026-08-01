@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow, bail};
 use nvim_rs::compat::tokio::Compat;
 use nvim_rs::error::LoopError;
-use nvim_rs::{Handler, Neovim};
+use nvim_rs::{Handler, Neovim, UiAttachOptions};
 use rmpv::Value;
 use tokio::io::{AsyncBufReadExt as _, BufReader, WriteHalf};
 use tokio::net::TcpStream;
@@ -39,6 +39,18 @@ pub struct NvimConfig {
     pub appname: String,
 }
 
+/// [`NvimServer::spawn`] が返す受信口一式。
+///
+/// host イベントと `redraw` は流量も寿命も違う（`redraw` は UI がアタッチして
+/// いる間だけ、しかもキー 1 打ごとに来る）ので、同じチャンネルに混ぜない。
+#[derive(Debug)]
+pub struct NvimHandles {
+    pub host: UnboundedReceiver<HostEvent>,
+    /// `redraw` 通知の params を **未パースのまま** 運ぶ。解釈は
+    /// [`crate::ui`] 側の仕事で、RPC の io タスクを重くしないため。
+    pub redraw: UnboundedReceiver<Vec<Value>>,
+}
+
 /// 常駐 headless nvim と、その RPC 接続。
 pub struct NvimServer {
     child: Child,
@@ -64,7 +76,7 @@ impl NvimServer {
     ///
     /// ポートを奪われて nvim が bind に失敗した場合（TOCTOU、→ DESIGN §4.6）は、
     /// ポートを取り直して再試行する。
-    pub async fn spawn(cfg: &NvimConfig) -> anyhow::Result<(Self, UnboundedReceiver<HostEvent>)> {
+    pub async fn spawn(cfg: &NvimConfig) -> anyhow::Result<(Self, NvimHandles)> {
         let init_lua = cfg.runtime_dir.join("init.lua");
         if !init_lua.is_file() {
             bail!(
@@ -73,7 +85,12 @@ impl NvimServer {
             );
         }
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let (redraw_tx, redraw_rx) = mpsc::unbounded_channel();
+        let handler = EventHandler {
+            host: host_tx,
+            redraw: redraw_tx,
+        };
         let mut failures = Vec::new();
 
         for attempt in 1..=PORT_ATTEMPTS {
@@ -83,9 +100,9 @@ impl NvimServer {
             let mut child = spawn_child(cfg, &init_lua, port)?;
             drain_stderr(&mut child, port)?;
 
-            match attach(port, &mut child, &tx).await {
+            match attach(port, &mut child, &handler).await {
                 Ok((nvim, io)) => {
-                    let io_watch = watch_io(io, tx.clone());
+                    let io_watch = watch_io(io, handler.host.clone());
                     return Ok((
                         Self {
                             child,
@@ -93,7 +110,10 @@ impl NvimServer {
                             nvim,
                             io_watch,
                         },
-                        rx,
+                        NvimHandles {
+                            host: host_rx,
+                            redraw: redraw_rx,
+                        },
                     ));
                 }
                 Err(e) => {
@@ -127,6 +147,58 @@ impl NvimServer {
             )
             .await
             .context("require('anywhere').start_session failed")?;
+        Ok(())
+    }
+
+    /// この RPC チャンネルを UI クライアントとして登録する。以後 `redraw` 通知が
+    /// [`NvimHandles::redraw`] へ流れてくる。
+    ///
+    /// 立てるのは `rgb` と `ext_linegrid` だけ。cmdline / メッセージ / 補完メニューは
+    /// nvim にグリッドへ描かせる（外部化すると自前で全部組み直すことになる）。
+    pub async fn attach_ui(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let mut opts = UiAttachOptions::new();
+        opts.set_rgb(true).set_linegrid_external(true);
+        self.nvim
+            .ui_attach(i64::from(cols), i64::from(rows), &opts)
+            .await
+            .with_context(|| format!("nvim_ui_attach({cols}, {rows}) failed"))?;
+        debug!(cols, rows, "attached as a ui client");
+        Ok(())
+    }
+
+    /// ウィンドウのリサイズを nvim へ伝える。
+    pub async fn try_resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.nvim
+            .ui_try_resize(i64::from(cols), i64::from(rows))
+            .await
+            .with_context(|| format!("nvim_ui_try_resize({cols}, {rows}) failed"))?;
+        Ok(())
+    }
+
+    /// key-notation（→ [`crate::ui::input`]）をそのまま nvim へ流し込む。
+    pub async fn input(&self, keys: &str) -> anyhow::Result<()> {
+        let written = self
+            .nvim
+            .input(keys)
+            .await
+            .with_context(|| format!("nvim_input({keys:?}) failed"))?;
+        // nvim は「今回受け取れたバイト数」を返す。入力バッファが埋まっていると
+        // 要求より短くなるが、GUI から来るのは 1 打分（数バイト）なので実際には
+        // 起こらない。仮に起きても再送はしない ── 取りこぼしを黙って補うより、
+        // ログに残して原因を見えるようにする。
+        if usize::try_from(written).ok().is_none_or(|n| n < keys.len()) {
+            debug!(
+                written,
+                requested = keys.len(),
+                "nvim_input did not take every byte"
+            );
+        }
+        Ok(())
+    }
+
+    /// `AwQuit` を実行する（ウィンドウの × 用）。破棄の意味論は `ZQ` と同じ。
+    pub async fn quit_session(&self) -> anyhow::Result<()> {
+        self.nvim.command("AwQuit").await.context("AwQuit failed")?;
         Ok(())
     }
 
@@ -200,13 +272,9 @@ fn drain_stderr(child: &mut Child, port: u16) -> anyhow::Result<()> {
 type Attached = (Neovim<HostWriter>, JoinHandle<Result<(), Box<LoopError>>>);
 
 /// 接続して host のチャンネルを登録するまで。失敗はすべてポート再試行の理由になる。
-async fn attach(
-    port: u16,
-    child: &mut Child,
-    tx: &UnboundedSender<HostEvent>,
-) -> anyhow::Result<Attached> {
+async fn attach(port: u16, child: &mut Child, handler: &EventHandler) -> anyhow::Result<Attached> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let (nvim, io) = connect(addr, child, tx).await?;
+    let (nvim, io) = connect(addr, child, handler).await?;
 
     // ポートを奪われていると nvim ではない相手に繋がり、応答が返ってこない。
     // 期限を切らないと host の起動がここで永久に止まる（→ DESIGN §4.6）。
@@ -233,7 +301,7 @@ async fn attach(
 async fn connect(
     addr: SocketAddr,
     child: &mut Child,
-    tx: &UnboundedSender<HostEvent>,
+    handler: &EventHandler,
 ) -> anyhow::Result<Attached> {
     let mut last_err = None;
 
@@ -245,8 +313,7 @@ async fn connect(
             // bind に失敗して即死した（→ DESIGN §4.6）。ポートを取り直せば直りうる。
             bail!("nvim exited before accepting a connection ({status})");
         }
-        let handler = EventHandler { tx: tx.clone() };
-        match nvim_rs::create::tokio::new_tcp(addr, handler).await {
+        match nvim_rs::create::tokio::new_tcp(addr, handler.clone()).await {
             Ok(attached) => return Ok(attached),
             Err(e) => {
                 last_err = Some(e);
@@ -303,9 +370,11 @@ fn watch_io(
     })
 }
 
+/// nvim からの通知の受け口。接続のたびに clone される（`new_tcp` が所有するため）。
 #[derive(Clone)]
 struct EventHandler {
-    tx: UnboundedSender<HostEvent>,
+    host: UnboundedSender<HostEvent>,
+    redraw: UnboundedSender<Vec<Value>>,
 }
 
 #[async_trait::async_trait]
@@ -313,9 +382,19 @@ impl Handler for EventHandler {
     type Writer = HostWriter;
 
     async fn handle_notify(&self, name: String, args: Vec<Value>, _nvim: Neovim<HostWriter>) {
+        // `redraw` は解釈せずそのまま渡す。UI プロトコルの意味論は core の `ui` が
+        // 持っており、ここで触ると RPC の io タスクが描画の都合で重くなる。
+        if name == "redraw" {
+            if self.redraw.send(args).is_err() {
+                // UI が居ない（まだアタッチしていない / もう畳んだ）だけで異常ではない。
+                debug!("nobody is listening for redraw batches anymore; dropped");
+            }
+            return;
+        }
+
         match parse_notification(&name, &args) {
             Ok(Some(event)) => {
-                if self.tx.send(event).is_err() {
+                if self.host.send(event).is_err() {
                     warn!(
                         notification = name,
                         "nobody is listening for host events anymore"

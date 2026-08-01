@@ -1,6 +1,6 @@
 # Anywhere Nvim — 設計ドキュメント
 
-**ステータス:** v1 設計確定 / 実装済み（ステップ 1〜6。Windows 実機での検証は未実施）
+**ステータス:** v2 実装済み（UI 内製。Windows 実機で起動〜取得〜編集〜書き戻しまで確認。IME の実機確認は継続中）
 **対象プラットフォーム:** Windows 11 (x64) 専用
 **実装言語:** Rust (ネイティブアプリ)
 
@@ -55,16 +55,15 @@
 ### v1 でやらないこと
 
 - 複数セッション
-- エディタの差し替え（構成上は差し替え可能だが、機能としては提供しない）
+- エディタの差し替え（UI も nvim も自前の組み合わせに固定する）
 - 設定 GUI（設定はローカルの `init.lua` を直接書く）
 - 幅広いアプリケーションへの対応保証
 - クロスプラットフォーム対応
 - プラグインシステム
-- 自前 UI の実装（→ 4.3 で詳述。将来やるなら独立プロジェクト）
 
 ### 将来検討
 
-AI 補完 / スニペット / テンプレート / 編集履歴 / アプリごとの設定 / 編集対象フィルタ / Markdown プレビュー / 自前 UI
+AI 補完 / スニペット / テンプレート / 編集履歴 / アプリごとの設定 / 編集対象フィルタ / Markdown プレビュー
 
 ---
 
@@ -80,10 +79,10 @@ AI 補完 / スニペット / テンプレート / 編集履歴 / アプリご�
 │  - グローバルホットキー                         │
 │  - UI Automation / クリップボード               │
 │  - 対象ウィンドウの HWND 保持とフォーカス復帰   │
-│  - Neovide ウィンドウの表示 / 非表示制御        │
+│  - 編集ウィンドウ（winit + Direct2D）と IME     │
 │  - セッション状態機械                           │
 └───────┬─────────────────────────────────────────┘
-        │ msgpack-rpc (クライアントとして接続)
+        │ msgpack-rpc。API クライアントと UI クライアントを 1 本で兼ねる
         │ 127.0.0.1:PORT
         ↓
 ┌──────────────────────────────────────────────────┐
@@ -91,39 +90,28 @@ AI 補完 / スニペット / テンプレート / 編集履歴 / アプリご�
 │                                                  │
 │  - バッファの実体（常駐。セッション毎に死なない）│
 │  - 同梱 init.lua + ローカル設定をロード（→ 5.4） │
-└───────┬──────────────────────────────────────────┘
-        ↑ ui_attach
-        │
-┌───────┴────────────────────────────────────────────┐
-│ neovide.exe --server=127.0.0.1:PORT                │
-│                                                    │
-│  - 画面を出すだけ。常駐し、表示/非表示を切り替える │
-└────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────┘
 ```
 
-3 プロセスすべてがアプリ起動時に立ち上がり、終了まで生き続ける。
+2 プロセスともアプリ起動時に立ち上がり、終了まで生き続ける。
 
 ### 3.2 各プロセスの責務
 
 | プロセス | 責務 | 責務外 |
 |---|---|---|
-| host | OS との対話全般、セッション管理 | テキストの編集そのもの |
+| host | OS との対話全般、セッション管理、描画・入力・IME | テキストの編集そのもの |
 | nvim | テキストの保持と編集 | 画面表示、OS 操作 |
-| neovide | 描画と入力受付、IME | 状態の保持 |
 
-**nvim を起動するのは host の責務であり、Neovide ではない。**
-Neovide は `--server` 指定時に nvim を spawn しないため、`-u` 等のオプションを Neovide に渡しても意味がない。
+**nvim を起動するのは host の責務。** host は同じ RPC 接続で `nvim_ui_attach` を呼び、API クライアントと UI クライアントを兼ねる。接続を 2 本張らないので、切断・再起動の面倒を見る先も 1 つで済む。
 
 ### 3.3 通信経路
 
 | 経路 | 手段 |
 |---|---|
-| host → nvim | msgpack-rpc over TCP。`nvim_buf_set_lines` 等の API 呼び出し |
-| nvim → host | `vim.rpcnotify(host_chan, "...")`。init.lua から通知 |
-| neovide ↔ nvim | `ui_attach`。host は関与しない |
-| host → neovide | なし。Win32 API で HWND を直接操作する |
+| host → nvim | msgpack-rpc over TCP。`nvim_buf_set_lines` 等の API 呼び出しと、`nvim_input` / `nvim_ui_try_resize` |
+| nvim → host | `vim.rpcnotify(host_chan, "...")` による通知（init.lua から）と、`ui_attach` 済みチャンネルへ流れる `redraw` |
 
-host と Neovide は **同じ nvim に別チャンネルで繋がっているだけ** で、互いに通信しない。
+`redraw` は RPC のハンドラでは解釈せず、そのまま core の `ui` へ渡して状態を組み立て、GUI が自前で描く（→ 7）。
 
 ---
 
@@ -139,29 +127,29 @@ host と Neovide は **同じ nvim に別チャンネルで繋がっているだ
 
 **トレードオフ:** register / undo 履歴 / jumplist がセッション間で引き継がれる。これは個人ツールでは概ね利点（前のセッションでヤンクしたものを次で貼れる）。バッファの汚れが気になる場合はセッション開始時に旧バッファを `bwipeout` する。
 
-### 4.2 Neovide を同梱する（自前 UI を作らない）
+### 4.2 UI を自前で持つ（Neovide を同梱しない）
 
-**判断:** v1 では Neovide を同梱し、`--server` でアタッチする。
+**判断:** host 自身が `nvim_ui_attach` して描画する。winit がウィンドウ・キーボード・IME を、Direct2D/DirectWrite が描画を担う。
 
-**却下案:** 自前 UI の実装。
+**却下案:** Neovide の同梱（v1 はこれだった）。
 
-nvim の UI クライアントを名乗るとは `nvim_ui_attach` して redraw イベントを自前描画すること、すなわち **端末エミュレータ相当を書く** ということ。最小構成でも `hl_attr_define` / `grid_line` / `grid_scroll` / `grid_cursor_goto` / `flush` / `mode_change` の処理、等幅グリッドのグリフ描画、キー入力から `nvim_input` 記法への変換が必要になる。
+**捨てた理由は IME。** Neovide を選んだ最大の動機が日本語入力だったにもかかわらず、実機で **変換中の未確定文字列がまったく表示されなかった**。Neovide は winit から受け取った preedit を自分で描かず、lua の `neovide.preedit_handler()` に投げる設計で、既定では誰も描かない（neovide#1931、FAQ）。描かせるには nvim nightly の API とサードパーティのプラグインが要る。「どこでも快適にテキスト編集」が目的のアプリで、日本語入力が他人の実装待ちになるのは本末転倒。
 
-**決定打は IME。** 日本語入力を扱うには未確定文字列の表示、候補ウィンドウの位置合わせ、確定タイミングの制御を自前で持つ必要がある。winit の Windows 版 IME サポートは十分に成熟していない。「どこでも快適にテキスト編集」が目的のアプリで日本語入力が快適でないのは本末転倒。
+**winit 自体は問題なかった。** `src/platform_impl/windows/ime.rs` は `GCS_COMPSTR` に加えて `GCS_COMPATTR` を読み、**変換対象クラスタのバイト範囲つき**で `Ime::Preedit` を配る。`WM_IME_SETCONTEXT` では `ISC_SHOWUICOMPOSITIONWINDOW` を落とし、`WM_IME_COMPOSITION` では `DefWindowProc` を呼ばない ── つまり既にインライン IME として振る舞う。足りなかったのは「preedit を描く UI」だけだった。
 
-**「起動が速い」という動機は消えた。** UI プロセスごと常駐させて `ShowWindow` で出し入れするため、起動コストは初回のみ。
+**代償:** 端末エミュレータ相当を自前で持つことになる。`grid_line` / `grid_scroll` / `hl_attr_define` / `mode_change` の適用（`anywhere-core` の `ui`）、等幅グリッドの描画（`gui/render.rs`）、キーの nvim 記法への変換（`ui::input`）。ただしそのぶん UI プロセスが消え、v1 で泥仕事だったウィンドウ探索・ツールウィンドウの回避・UI プロセスの生存監視がまるごと不要になった。
 
-**構成上、UI は完全に差し替え可能。** host も nvim も一切変更せずに UI だけ入れ替えられるので、自前 UI をやりたくなったら独立プロジェクトとして着手すればよい。v1 に抱き合わせる理由がない。
+**描画に Direct2D/DirectWrite を選んだ理由:** Windows 専用アプリであり、`windows` crate は UIA で既に依存にある。日本語のフォントフォールバックとグリフ品質はシステムの実装がいちばん確実で、GPU スタックを 1 つ増やさずに済む。
 
 ### 4.3 セッション終了で nvim を殺さない
 
 **判断:** `:q` 系コマンドを乗っ取り、nvim を生かしたままウィンドウを隠す。
 
-**理由:** 素の `:q!` は Neovide ではなく **nvim 本体を殺す**。常駐サーバーが消滅し、Neovide も道連れになる。
+**理由:** 素の `:q!` は UI ではなく **nvim 本体を殺す**。常駐サーバーが消滅し、編集ウィンドウは何も映さなくなる。
 
 **却下案:** 毎回死なせて、即座に新しいペアを裏で spawn しておく。
 
-一見きれい（`:q!` も `ZZ` もネイティブに動き、状態も毎回まっさら）だが、**新しい Neovide が起動する瞬間に前面へ出てくる**。これは host が元アプリへフォーカスを戻した直後に発生するため、書き戻し直後にフォーカスを奪われる。遅延させれば緩和できるが、その間にホットキーが押されると待たされる。「見えないところの速度」のために「見えるところの体験」を壊すのは割に合わない。
+一見きれい（`:q!` も `ZZ` もネイティブに動き、状態も毎回まっさら）だが、nvim の起動は一瞬では終わらない。ホットキーを押した瞬間に前の nvim がまだ畳まれていなければ待たされるし、4.1 で挙げた「前のセッションのヤンクが次でも使える」も失われる。常駐しているものを毎回作り直す理由がない。
 
 ただし **この案は異常系のリカバリとして採用する**（→ 6.3）。
 
@@ -185,7 +173,7 @@ nvim の UI クライアントを名乗るとは `nvim_ui_attach` して redraw 
 
 **判断:** `--listen 127.0.0.1:PORT`。
 
-**理由:** 名前付きパイプのほうが Windows では筋が良いが、Neovide の `--server` におけるパイプ対応が不安定。個人ツールでローカルポートを開くのが許容できるなら TCP のほうが実装が単純。
+**理由:** 名前付きパイプのほうが Windows では筋が良いが、個人ツールでローカルポートを開くのが許容できるなら TCP のほうが実装が単純で、nvim 側の指定も 1 行で済む。
 
 **注意:**
 
@@ -213,7 +201,7 @@ nvim の UI クライアントを名乗るとは `nvim_ui_attach` して redraw 
 - `:q` 系の `cnoreabbrev`
 - `VimLeavePre` の autocmd
 
-**そしてこの 3 つは、壊れても致命傷にならない。** 6.3 の安全網（RPC 切断検知 / Neovide プロセス watch）が既にこのケースを設計に織り込んでいる。`ZZ` が潰されて素の `:q!` が nvim に届いても、host は切断を検知してペアを再起動し Idle に戻る。データ破損ではなく機能低下として着地する。
+**そしてこの 3 つは、壊れても致命傷にならない。** 6.3 の安全網（RPC 切断検知）が既にこのケースを設計に織り込んでいる。`ZZ` が潰されて素の `:q!` が nvim に届いても、host は切断を検知して nvim を再起動し Idle に戻る。データ破損ではなく機能低下として着地する。
 
 したがって **同梱コアを先に読み、ローカル設定に自由を与え、最後に上記 3 つだけを再宣言する** のが最善。ローカル設定は見た目とオプションを自由に上書きでき、契約は再宣言で復元され、再宣言すら遅延実行で掻い潜られた場合は安全網が受け止める。却下案が欲しかった保護を、却下案のコストを払わずに得られる。
 
@@ -247,10 +235,9 @@ lazy.nvim / Mason / nvim-treesitter / LSP がロードされると、常駐化�
 ### 5.3 同梱物
 
 - `nvim.exe` および runtime 一式
-- `neovide.exe`
 - 専用 `init.lua`
 
-システムにインストールされた Neovim には一切依存しない。
+UI は host 自身が持つため、同梱する exe は nvim だけ。システムにインストールされた Neovim には一切依存しない。
 
 **セキュリティソフトの除外設定に同梱 exe を追加すること。** ESET を含む多くの製品は、署名のない新規 exe に対してスキャンやプロセス保護を行い、起動遅延やファイルアクセス拒否の原因になる。
 
@@ -345,9 +332,9 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
  └──[フォーカス復帰完了]── Applying <──[session_end]┘
 ```
 
-- **Idle:** Neovide は非表示。ホットキー待ち
+- **Idle:** 編集ウィンドウは非表示。ホットキー待ち
 - **Capturing:** 対象 HWND を保存し、テキストを取得
-- **Editing:** Neovide 表示中。この状態でホットキーが押されたら Neovide にフォーカスを移すだけ
+- **Editing:** 編集ウィンドウ表示中。この状態でホットキーが押されたら、そのウィンドウにフォーカスを移すだけ
 - **Applying:** 書き戻しとフォーカス復帰。一瞬で通過する遷移状態であり、実装上は `session_end` ハンドラ内で同期的に完結してよい（付録 B はそうしている）
 
 対象が取得できなかった場合は何もせず Idle に戻る（要件通り）。
@@ -358,12 +345,12 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
 2. `GetForegroundWindow()` で対象 HWND を保存
 3. テキスト取得（→ 8 章）
 4. host が `nvim_buf_set_lines` でバッファへ流し込む
-5. host が Neovide ウィンドウを表示、フォーカスを移す
+5. host が編集ウィンドウを表示、フォーカスを移す
 6. ユーザーが編集
 7. `:w` 系 → `BufWriteCmd` が発火 → init.lua が host に `session_write`(内容) を通知。host は内容を保持するだけで、この時点では書き戻さない
 8. `ZZ` / `:wq` / `:x` → 書き込み後に `session_end`
 9. `ZQ` / `:q` / `:q!` → 書き込まずに `session_end`
-10. host が Neovide を隠す
+10. host が編集ウィンドウを隠す
 11. host が対象 HWND へフォーカスを復帰
 12. このセッションで `session_write` を一度でも受信しており、かつ最後に保存された内容が取得時と異なれば書き戻す（→ 9 章）
 
@@ -373,13 +360,12 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
 
 **これは網羅的ではない。** `:quit` / `:qa!` / `:xa` などは抜ける。個人ツールなので、抜けたら都度追加すればよい。完全性より「明日から使える」ことを優先する。
 
-抜けた場合、および nvim がクラッシュした場合に備え、**必ず安全網を持つこと。** 検知は三本立てにする。
+抜けた場合、および nvim がクラッシュした場合に備え、**必ず安全網を持つこと。** 検知は二本立てにする。
 
 - host 側: RPC チャンネルの切断を検知する（**これを正とする**）
-- host 側: Neovide の死を watch する。**実機（Windows 11 / Neovide 同梱ビルド）で確認した挙動は「ウィンドウを × で閉じるとウィンドウだけが破棄され、Neovide プロセスは生き残り、サーバー側 nvim にも quit は届かない」である。** したがってプロセス終了の監視だけでは検知できない。掴んだ HWND の生存（`IsWindow`）も併せて監視すること。放置すると HWND が stale になり、以降のホットキーが全て「ウィンドウを出せない」で失敗し続ける
 - init.lua 側: `VimLeavePre` で host に `nvim_dying` を通知する。ただし終了処理中の `rpcnotify` はフラッシュされない可能性があるため、**早期ヒント以上の役割を与えないこと**
 
-いずれかを検知したら、**host は nvim + Neovide のペアを再起動し、状態を Idle にリセットする。** 4.3 で却下した「毎回再起動」案を、通常経路ではなく異常系のリカバリとして使う形になる。これにより「host がセッション中の状態で固まる」ことを防げる。
+いずれかを検知したら、**host は nvim を再起動して `ui_attach` をやり直し、状態を Idle にリセットする。** 4.3 で却下した「毎回再起動」案を、通常経路ではなく異常系のリカバリとして使う形になる。これにより「host がセッション中の状態で固まる」ことを防げる。編集ウィンドウは host 自身のものなので作り直さない ── ただし古いグリッドが残らないよう、再起動のついでに隠す。
 
 **誤発火に注意:** host 自身の終了処理（トレイの Exit）でも切断とプロセス終了は発生する。意図的シャットダウン中であることをフラグで持ち、リカバリを抑止すること。
 
@@ -392,38 +378,44 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
 
 ---
 
-## 7. Neovide ウィンドウの制御
+## 7. 編集ウィンドウ
 
-Neovide には「隠れろ」というコマンドが存在しないため、host が HWND を掴んで Win32 API で直接操作する。
+ウィンドウは host 自身のものになった。探索も生存監視も要らず、Win32 を直に叩くのは前面化（7.3）だけ。
 
-### 7.1 HWND の特定
+### 7.1 生成
 
-1. Neovide を spawn し、PID を保持
-2. `SetWinEventHook` で `EVENT_OBJECT_SHOW` を待つ（起動直後はまだウィンドウが存在しないため）
-3. `EnumWindows` + `GetWindowThreadProcessId` で PID が一致するトップレベルウィンドウを探す
+winit で作る。`visible=false` / `active=false` / `skip_taskbar=true` で、**作った時点では画面に出ないしフォーカスも奪わない**。v1 の「画面外へ飛ばしてから隠す」待避は不要になった。
 
-ポーリングでも実装可能だが、フックのほうが確実。
-
-**`WS_EX_TOOLWINDOW` を必ず除外すること。** Neovide（winit）は同一プロセスに `Winit Thread Event Target` という 14x14 のツールウィンドウと IME 用の隠しウィンドウも作る。実機ではツールウィンドウのほうが先に列挙され、それを掴むと **本物の窓が起動時から出たまま隠れず、`:wq` 後も残り、ホットキーでフォーカスも移らない**（隠しているのも前面化しているのも別のウィンドウなので、host 側のエラーにはならない）。本物のウィンドウはクラス `Window Class`、タイトルはバッファ名（`anywhere://edit`）。
+winit の HWND（`raw-window-handle` 経由）に Direct2D の `ID2D1HwndRenderTarget` を載せる。セル寸法は DirectWrite に実測させる（`IDWriteFontFace::GetMetrics` と `'M'` の `GetDesignGlyphMetrics`）。ウィンドウはレンダーターゲットより先に要るので、暫定サイズで作ってから実測値で `request_inner_size` し直す。
 
 ### 7.2 表示 / 非表示
 
 | タイミング | 操作 |
 |---|---|
-| 起動時 | `SetWindowPos` で画面外（例: -32000, -32000）へ移動 → `ShowWindow(SW_HIDE)` |
-| 表示時 | `SetWindowPos` で適切な位置へ → `ShowWindow(SW_SHOW)` → フォーカス |
-| 終了時 | `ShowWindow(SW_HIDE)` → 対象アプリへフォーカス復帰 |
+| 起動時 | 生成時点で非表示。何も見えない |
+| 表示時 | プライマリモニタ中央へ移動 → `set_visible(true)` → フォーカス（→ 7.3） |
+| 終了時 | `set_visible(false)` → 対象アプリへフォーカス復帰 |
 
-起動時に一瞬ちらつく可能性があるが、**アプリ起動時の 1 回のみ**であり、座標を画面外へ飛ばしてから隠せば実質見えない。毎セッション発生する案（4.3 の却下案）とは影響度が桁違い。
+ウィンドウの × はウィンドウを壊さず、`AwQuit`（= `ZQ`、破棄）として nvim へ流す。セッション外の × は無視する。
 
 ### 7.3 フォーカス復帰
 
-Windows には `SetForegroundWindow` の呼び出し制限があるため、単純に呼んでも効かないことがある。
+Windows には `SetForegroundWindow` の呼び出し制限があるため、単純に呼んでも効かないことがある。winit の `Window::focus_window()` は素で `SetForegroundWindow` を呼ぶだけなので使わない。
 
-- `AttachThreadInput` で対象ウィンドウのスレッドに入力キューをアタッチしてから `SetForegroundWindow` を呼ぶ
-- あるいは `AllowSetForegroundWindow` を併用する
+- **現在の前面ウィンドウのスレッド**へ `AttachThreadInput` してから `SetForegroundWindow` を呼ぶ（対象スレッドへアタッチする版は実機で拒否された）
+- `AllowSetForegroundWindow` を併用し、最後に `GetForegroundWindow` で結果を検証する
+- UIA が返すのは子コントロールの HWND なので、必ず `GA_ROOT` を解決してから扱う
 
-ここは環境依存で挙動が変わるため、**実機で確認しながら詰めること。** 泥仕事になるのは織り込み済み。
+### 7.4 IME（このアプリの主目的）
+
+winit は既にインライン IME として振る舞う（→ 4.2）。host がやるのは次の 4 つ。
+
+- **有効・無効の切り替え:** `mode_change` を見て、挿入 / 置換 / コマンドライン / 端末 / 選択モードのときだけ `set_ime_allowed(true)`。ノーマルモードで IME が生きていると `dd` が打てない
+- **未確定文字列を描く:** `Ime::Preedit` は nvim へ送らず、カーソル位置へ自前で重ねて描く。全体に細い下線、`target`（変換対象クラスタ）は反転 + 太い下線
+- **候補ウィンドウの位置:** カーソルセルの矩形を `set_ime_cursor_area` で渡す
+- **確定文字列だけを流す:** `Ime::Commit` を `nvim_input` へ（`<` は `<lt>` へ逃がす）。`nvim_paste` は使わない ── モードに依らず一貫させたいのと、`vim.paste` と acwrite バッファの契約を干渉させないため
+
+変換中（composition 中）のキーイベントは nvim へ流さない。IME が食ったキーが二重に入るのを防ぐ。
 
 ---
 
@@ -542,6 +534,14 @@ v1 では非対応。常に入力欄の全内容が対象。
 
 その場合の着地点は「素の `:q!` が nvim に届き、host が切断を検知してペアを再起動する」であり、編集内容が失われる以上の被害はない。**設定を書くのは自分自身なので、これ以上の防御はしない。**
 
+### 10.8 自前 UI が持たないもの
+
+- **マウス操作。** クリックもホイールも nvim へ送っていない（`nvim_input_mouse` を呼ばない）。キーボードだけで完結するツールなので必要になるまで入れない
+- **`ext_multigrid` / `ext_cmdline` / `ext_popupmenu` / `ext_messages`。** cmdline も補完メニューも浮動ウィンドウも、nvim にグリッドへ描かせる。GUI 側で作り直す価値がない
+- **フォントは単一ファミリ + `MS Gothic` フォールバックのみ。** `guifont` はカンマ区切りの候補列を受け付けない（先頭だけ採ると残りを黙って捨てることになるため、解けない指定は現状維持 + 警告）
+- **`undercurl` は点線で描く。** 波線は諦めた
+- **合字・絵文字は等幅グリッドから外れうる。** 等幅前提でセルへ割り付けているので、送り幅が違うグリフは桁がずれる
+
 ---
 
 ## 11. 実装スタック
@@ -553,15 +553,17 @@ v1 では非対応。常に入力欄の全内容が対象。
 | グローバルホットキー | `global-hotkey` |
 | トレイアイコン | `tray-icon` |
 | nvim RPC | `nvim-rs` |
-| Win32 / UI Automation | `windows` |
-| クリップボード | `arboard`（復元まで厳密にやるなら Win32 直叩き） |
+| ウィンドウ / キーボード / IME | `winit`（+ `raw-window-handle` で HWND を取り出す） |
+| 描画 / Win32 / UI Automation | `windows`（Direct2D・DirectWrite・IMM32 は winit 側） |
+| クリップボード | Win32 直叩き |
 
 ### 11.2 スレッドモデル（重要）
 
 COM のアパートメント地雷を踏まないこと。
 
 - **UI Automation は MTA で回す**
-- **グローバルホットキーとウィンドウメッセージは専用のメッセージポンプスレッドに隔離する**
+- **main スレッドは winit のイベントループが占有する。** 描画・キーボード・IME に加え、トレイとグローバルホットキーの隠しウィンドウのメッセージもここで汲まれる（どちらも「登録したスレッドでループが回っていること」を要求するので、イベントループを回すスレッドで作る）
+- **`Session` と nvim の RPC は controller スレッドだけが触る。** GUI からは `Cmd`、GUI へは `EventLoopProxy` の `UserEvent`
 
 これを混ぜると「特定のアプリでのみ、なぜかハングする」という原因究明が極めて困難な不具合が発生する。最初から分けること。
 
@@ -579,21 +581,20 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 
 1. host が nvim を `--headless --listen` で起動し、RPC 接続できる
 2. `nvim_buf_set_lines` で任意の文字列をバッファへ流し込める
-3. Neovide を手動でアタッチし、表示して編集できる
+3. UI クライアントを手動でアタッチし、表示して編集できる
 4. `:wq` → host のコンソールに編集後テキストが出力される
 5. `:w` のあと `:q` → 保存済みの内容が host に反映される（状態契約の確認）
 6. 一度も保存せず `:q!` → host が破棄し、**nvim プロセスが生きたまま**である
-7. Neovide のウィンドウを × で閉じる → host が検知し、ペアを再起動して Idle に戻る
 
-**6 と 7 が最も怪しい。ここを最初に通すこと。** これが通れば、このプロジェクトの技術的リスクはほぼ消滅する。
+**6 が最も怪しい。ここを最初に通すこと。** これが通れば、このプロジェクトの技術的リスクはほぼ消滅する。
 
 ### ステップ 2 — 常駐化と表示制御
 
 - トレイアイコン
 - グローバルホットキー
-- Neovide の HWND 特定、起動時の非表示化
+- 編集ウィンドウの生成（非表示のまま）
 - ホットキーでの表示 / セッション終了時の非表示
-- 編集中にホットキーが押されたら Neovide にフォーカス
+- 編集中にホットキーが押されたら編集ウィンドウにフォーカス
 
 ### ステップ 3 — UIA 経路
 
@@ -628,9 +629,9 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 
 見た目やオプションはローカル設定へ。同梱コアに追加するのは、契約に関わるものだけに留める。
 
-### （将来）ステップ 8 — 自前 UI
+### ステップ 8 — 自前 UI（実施済み）
 
-やりたくなったら独立プロジェクトとして。IME の設計から始めること。
+Neovide の IME が使い物にならなかったため実施（→ 4.2）。順序は core の状態モデル（`ui`）→ キー記法（`ui::input`）→ Direct2D レンダラ → winit シェルと host 統合。**IME は最後の仕上げではなく、設計の出発点に置くこと。**
 
 ---
 
@@ -806,13 +807,12 @@ let nvim = connect_tcp_with_retry(port).await?;  // nvim-rs。nvim が listen �
 let (chan, _api) = nvim.get_api_info().await?;
 nvim.exec_lua("require('anywhere').set_host(...)", vec![chan.into()]).await?;
 
-let neovide_child = Command::new(bundled("neovide.exe"))
-    .arg(format!("--server=127.0.0.1:{port}"))
-    .spawn()?;
+// UI クライアントとしても同じ接続を使う（→ 3.3）
+nvim.ui_attach(cols, rows, &opts /* rgb + ext_linegrid */).await?;
 
-let hwnd = wait_for_window(neovide_child.id())?;  // SetWinEventHook
-move_offscreen(hwnd);
-hide(hwnd);
+// ウィンドウは winit のイベントループ側で作る。作った時点では見えない
+let window = create_window(visible: false, active: false, skip_taskbar: true);
+let renderer = Renderer::new(window.hwnd(), &font, window.scale_factor())?;
 ```
 
 ```rust
@@ -822,7 +822,7 @@ match event.as_str() {
         state.written = Some(lines_from(args));  // 保持するだけ。書き戻しはセッション終了時
     }
     "session_end" => {
-        hide(neovide_hwnd);
+        hide(editor_window);
         restore_focus(state.target_hwnd);
         // 一度でも保存されていたら、最後に保存された内容を反映（無変化ならスキップ）
         if let Some(written) = &state.written {
@@ -838,7 +838,7 @@ match event.as_str() {
     }
     "nvim_dying" => {
         if !state.shutting_down {  // 意図的シャットダウン中は無視（→ 6.3 誤発火）
-            restart_pair();        // RPC 切断検知・Neovide 終了 watch も同じ経路に入る
+            restart_pair();        // RPC 切断検知も同じ経路。作り直したら ui_attach もやり直す
             state.phase = Phase::Idle;
         }
     }
@@ -850,7 +850,7 @@ match event.as_str() {
 // ホットキーハンドラ
 match state.phase {
     Phase::Editing => {
-        focus(neovide_hwnd);     // 既存セッションへ戻すだけ
+        focus(editor_window);    // 既存セッションへ戻すだけ
     }
     Phase::Idle => {
         let target = GetForegroundWindow();
@@ -859,7 +859,7 @@ match state.phase {
         state.original = text.clone();
         state.written  = None;   // セッション毎に必ずリセット
         nvim.exec_lua("require('anywhere').start_session(...)", ...).await?;
-        show_and_focus(neovide_hwnd);
+        show_and_focus(editor_window);
         state.phase = Phase::Editing;
     }
     _ => {}
@@ -874,6 +874,6 @@ match state.phase {
 |---|---|
 | host | `anywhere-nvim.exe`。本アプリ本体 |
 | セッション | ホットキー押下から書き戻し完了までの一連の流れ |
-| ペア | nvim プロセスと Neovide プロセスの組 |
+| ペア | 常駐 nvim と、その RPC 接続（host イベントと `redraw` が相乗りする）の組 |
 | 対象 (target) | 編集元となる、フォーカス中の入力欄とそのウィンドウ |
 | UIA | UI Automation。Windows のアクセシビリティ API |

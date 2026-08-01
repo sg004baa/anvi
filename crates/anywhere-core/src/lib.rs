@@ -9,7 +9,8 @@ pub mod port;
 pub mod server;
 pub mod session;
 pub mod text;
+pub mod ui;
 
 pub use event::HostEvent;
-pub use server::{NvimConfig, NvimServer};
+pub use server::{NvimConfig, NvimHandles, NvimServer};
 pub use session::{Applied, Phase, Session};
