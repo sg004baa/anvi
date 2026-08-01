@@ -6,11 +6,16 @@
 //! 描いてしまうと、利用者は `guifont` が効いていないことに気づけない。解けなければ
 //! [`FontSpec::parse`] は `None` を返し、呼び出し側が警告を出して現状維持する。
 
-/// CJK を確実に描ける等幅フォント。フォールバック鎖の最後尾であり、既定でもある。
+/// 同梱フォントのファミリ名。フォールバック鎖の最後尾であり、既定でもある。
 ///
-/// Windows に標準で入っていて「等幅かつ日本語が全部出る」フォントは実質これだけ
-/// （Yu Gothic UI も Meiryo もプロポーショナル）。グリッド UI の土台にはこれを使う。
-const LAST_RESORT_FAMILY: &str = "MS Gothic";
+/// exe に埋め込んで [`crate::gui::render`] が独自のフォントコレクションとして
+/// DirectWrite へ渡すので、**利用者の環境に何が入っていようと必ず存在する**。
+/// 等幅で日本語まで持っているため、CJK の最終手段もこれで足りる。
+/// 名前は ttf の name テーブル（ID 1）と一致させること。
+pub const BUNDLED_FAMILY: &str = "Moralerspace Argon HW";
+
+/// フォールバック鎖の最後尾。同梱フォントなので「入っていない」ことがない。
+const LAST_RESORT_FAMILY: &str = BUNDLED_FAMILY;
 
 /// 既定のフォントサイズ（pt）。
 const DEFAULT_SIZE_PT: f32 = 12.0;
@@ -91,7 +96,7 @@ impl FontSpec {
 
     /// DirectWrite に渡すファミリ鎖。前から順に「使えるものを使う」。
     ///
-    /// 利用者指定 → `MS Gothic` の順に並べ、CJK が確実に出る等幅を最後に置く。
+    /// 利用者指定 → 同梱フォントの順に並べ、CJK が確実に出る等幅を最後に置く。
     /// 指定フォントが英数字しか持っていなくても、日本語は最後尾が拾う。
     ///
     /// DirectWrite の `CreateTextFormat` はカンマ区切りのファミリ列を解釈しない
@@ -157,22 +162,25 @@ mod tests {
     }
 
     #[test]
-    fn default_is_the_last_resort_font() {
+    fn default_is_the_bundled_font() {
         let spec = FontSpec::default();
-        assert_eq!(spec.family, "MS Gothic");
+        assert_eq!(spec.family, "Moralerspace Argon HW");
         assert_eq!(spec.size_pt, 12.0);
     }
 
     #[test]
-    fn fallback_chain_appends_the_last_resort_font() {
+    fn fallback_chain_appends_the_bundled_font() {
         let spec = FontSpec::parse("UDEV_Gothic:h12").expect("解けるはず");
-        assert_eq!(spec.fallback_chain(), "UDEV Gothic, MS Gothic");
+        assert_eq!(spec.fallback_chain(), "UDEV Gothic, Moralerspace Argon HW");
     }
 
     #[test]
     fn fallback_chain_has_no_duplicate_last_resort() {
-        assert_eq!(FontSpec::default().fallback_chain(), "MS Gothic");
-        let spec = FontSpec::parse("ms_gothic:h12").expect("解けるはず");
-        assert_eq!(spec.fallback_chain(), "MS Gothic");
+        assert_eq!(
+            FontSpec::default().fallback_chain(),
+            "Moralerspace Argon HW"
+        );
+        let spec = FontSpec::parse("moralerspace_argon_hw:h12").expect("解けるはず");
+        assert_eq!(spec.fallback_chain(), "Moralerspace Argon HW");
     }
 }

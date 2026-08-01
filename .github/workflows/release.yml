@@ -70,6 +70,12 @@ jobs:
           mkdir -p stage/anywhere-nvim
           cp target/release/anywhere-nvim.exe stage/anywhere-nvim/
           scripts/make-bundle.sh nvim-win64 stage/anywhere-nvim
+          # 同梱 nvim のライセンスは zip に入っていないので、同じタグから取る。
+          curl -fsSL -o stage/anywhere-nvim/nvim/LICENSE.txt \
+            "https://raw.githubusercontent.com/neovim/neovim/${NVIM_VERSION}/LICENSE.txt"
+          for f in LICENSE-MIT LICENSE-APACHE LICENSE-Moralerspace.txt nvim/LICENSE.txt; do
+            test -s "stage/anywhere-nvim/$f"
+          done
 
       # 「起動はするが契約だけ死んでいる」バンドルを出さないための最終確認。
       # 常駐に成功すると bundle 解決・nvim 起動・ui_attach・トレイ・ホットキー登録が

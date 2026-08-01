@@ -28,6 +28,12 @@ cp -r "$repo/crates/anywhere-core/runtime" "$dest/runtime"
 cp -r "$nvim_src/bin" "$nvim_src/share" "$dest/nvim/"
 [[ -d $nvim_src/lib ]] && cp -r "$nvim_src/lib" "$dest/nvim/"
 
+# 再配布物のライセンスは配布物と同じ場所に置く（同梱フォントの OFL を含む）。
+# 同梱 nvim 自身のライセンスは nvim-win64.zip に入っていないので、リリース側で
+# nvim/LICENSE.txt として落としてくる（release.yml）。
+cp "$repo/LICENSE-MIT" "$repo/LICENSE-APACHE" "$dest/"
+cp "$repo/assets/fonts/LICENSE-Moralerspace.txt" "$dest/"
+
 # 空ファイルを置いていないことをここで確認する。host も起動時に同じ検査をする。
 for f in "$dest/runtime/init.lua" "$dest/runtime/lua/anywhere/init.lua"; do
   [[ -s $f ]] || { echo "empty after copy: $f" >&2; exit 1; }

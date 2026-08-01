@@ -237,8 +237,14 @@ lazy.nvim / Mason / nvim-treesitter / LSP がロードされると、常駐化�
 
 - `nvim.exe` および runtime 一式
 - 専用 `init.lua`
+- 描画フォント `Moralerspace Argon HW`（**exe に焼き込む**。ファイルとしては配らない）
+- ライセンス（`LICENSE-MIT` / `LICENSE-APACHE` / `LICENSE-Moralerspace.txt` / `nvim/LICENSE.txt`）
 
 UI は host 自身が持つため、同梱する exe は nvim だけ。システムにインストールされた Neovim には一切依存しない。
+
+フォントは `include_bytes!` で exe に入れ、DirectWrite のカスタムフォントコレクションとして使う（`gui/fontset.rs`）。**利用者の環境に何が入っていようと等幅 + 日本語が出ることを保証する**ためで、これが `guifont` 未指定時の既定であり、フォールバック鎖の最後尾でもある。`guifont` でシステムフォントを指定すればそちらが primary になり、そのフォントに無い文字だけ同梱フォントが拾う。
+
+アイコンも exe のリソースとして埋め込む（`build.rs` が名前 ID `1` で入れる）。トレイ・タスクバー・インストーラ・アンインストーラが同じ実体を指す。絵の出典は `scripts/make-icon.py` で、生成物 `assets/anywhere-nvim.ico` をコミットしている。
 
 **セキュリティソフトの除外設定に同梱 exe を追加すること。** ESET を含む多くの製品は、署名のない新規 exe に対してスキャンやプロセス保護を行い、起動遅延やファイルアクセス拒否の原因になる。
 
@@ -539,7 +545,7 @@ v1 では非対応。常に入力欄の全内容が対象。
 
 - **マウス操作。** クリックもホイールも nvim へ送っていない（`nvim_input_mouse` を呼ばない）。キーボードだけで完結するツールなので必要になるまで入れない
 - **`ext_multigrid` / `ext_cmdline` / `ext_popupmenu` / `ext_messages`。** cmdline も補完メニューも浮動ウィンドウも、nvim にグリッドへ描かせる。GUI 側で作り直す価値がない
-- **フォントは単一ファミリ + `MS Gothic` フォールバックのみ。** `guifont` はカンマ区切りの候補列を受け付けない（先頭だけ採ると残りを黙って捨てることになるため、解けない指定は現状維持 + 警告）
+- **フォントは単一ファミリ + 同梱 `Moralerspace Argon HW` フォールバックのみ。** `guifont` はカンマ区切りの候補列を受け付けない（先頭だけ採ると残りを黙って捨てることになるため、解けない指定は現状維持 + 警告）
 - **`undercurl` は点線で描く。** 波線は諦めた
 - **合字・絵文字は等幅グリッドから外れうる。** 等幅前提でセルへ割り付けているので、送り幅が違うグリフは桁がずれる
 
@@ -557,6 +563,7 @@ v1 では非対応。常に入力欄の全内容が対象。
 | ウィンドウ / キーボード / IME | `winit`（+ `raw-window-handle` で HWND を取り出す） |
 | 描画 / Win32 / UI Automation | `windows`（Direct2D・DirectWrite・IMM32 は winit 側） |
 | クリップボード | Win32 直叩き |
+| exe リソース（アイコン / バージョン情報） | `winresource`（build-dependencies） |
 
 ### 11.2 スレッドモデル（重要）
 
@@ -663,6 +670,8 @@ version とタグが食い違っていれば `verify-version` がその場で落
   MsgBox は必ず `UninstallSilent` が偽の枝にだけ置くこと）
 - インストール先（`Programs\anywhere-nvim`）とローカル設定（`anywhere-nvim`）は別物。
   前者にはアンインストーラ以外触らない
+- ウィザードのアイコンは `assets/anywhere-nvim.ico`、ライセンスページは `LICENSE-MIT`
+  （Apache-2.0 はインストール先の `LICENSE-APACHE`。→ 13.3）
 
 release.yml は毎回サイレントで「インストール → 配置と Run 値の確認 → `/KEEPDATA` で
 アンインストールしてデータが残ることの確認 → 再インストール → 既定でアンインストールして
@@ -678,6 +687,17 @@ release.yml は毎回サイレントで「インストール → 配置と Run �
 scoop 経路では自動起動もアンインストール時のデータ削除も行われない。ユーザーデータは
 アプリディレクトリの外（`%LOCALAPPDATA%\anywhere-nvim*`）にあるので、更新でも
 `scoop uninstall` でも消えない。消したければ手で消す。
+
+### 13.3 ライセンス
+
+本体は `MIT OR Apache-2.0`（`LICENSE-MIT` / `LICENSE-APACHE`）。再配布物のライセンスは
+配布物と一緒に置く（→ 5.3）。
+
+| 再配布するもの | ライセンス | 置き場所 |
+|---|---|---|
+| anywhere-nvim 本体 | MIT OR Apache-2.0 | `LICENSE-MIT` / `LICENSE-APACHE` |
+| Moralerspace Argon HW（exe に埋め込み） | SIL Open Font License 1.1 | `LICENSE-Moralerspace.txt` |
+| Neovim | Apache-2.0 | `nvim/LICENSE.txt`（release.yml が同じタグから取る） |
 
 ---
 

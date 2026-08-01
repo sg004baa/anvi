@@ -8,6 +8,7 @@
 //! ウィンドウも同じスレッドに属し、winit のループがそのメッセージを汲む。
 
 pub mod font;
+pub mod fontset;
 pub mod ime;
 pub mod keys;
 pub mod render;
