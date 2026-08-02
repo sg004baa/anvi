@@ -418,9 +418,19 @@ winit で作る。`visible=false` / `active=false` / `skip_taskbar=true` で、*
 
 **タイトルバーは出さない**（`decorations=false`）。中央に出して `ZZ` / `ZQ` で閉じる 1 枚窓であり、閉じる・最大化のボタンにも枠にも役割が無い。
 
-#### 透過（背景のみ）
+#### 透過（背景のみ）・枠線・余白
 
-背景は不透明度 60%（`render.rs` の `BACKGROUND_ALPHA`）。**透かすのは背景だけで、文字・カーソル・preedit は不透明のまま**にする。下に何が来るか分からない以上、文字まで透かすと読めなくなる。
+見た目の定数は 3 つとも `render.rs` の先頭にある。
+
+| 定数 | 値 | 何 |
+|---|---|---|
+| `BACKGROUND_ALPHA` | 0.75 | 背景の不透明度 |
+| `PADDING` | 8（論理 px） | グリッドの周囲の余白 |
+| `BORDER_WIDTH` / `BORDER_ALPHA` | 1（論理 px） / 0.45 | 枠線の太さと不透明度。色は既定の前景色 |
+
+**透かすのは背景だけで、文字・カーソル・preedit は不透明のまま**にする。下に何が来るか分からない以上、文字まで透かすと読めなくなる。枠線を引くのも同じ理由で、縁が無いと透けた背景が下のアプリと地続きに見える。
+
+余白は変換行列 1 枚（`SetTransform`）でずらして作る。セル座標の計算に余白を混ぜると全ての描画関数が余白を知る羽目になるため。`Clear` は変換の影響を受けないので余白も背景色で埋まり、枠線だけ恒等変換に戻してから引く。余白のぶんウィンドウは広がる（行列数は減らさない → `window::grid_for` / `resize_to_grid` が `pad` を受け取る）。**IME の候補ウィンドウ位置と preedit の右端打ち切りも余白のぶんずれる**ので、両方に同じ `pad` を渡すこと。
 
 そのために出力経路が HWND 直付けではない。`ID2D1HwndRenderTarget` は `D2D1_ALPHA_MODE_IGNORE` しか取れず、**アルファを持てない**。
 
@@ -433,7 +443,7 @@ D3D11 デバイス → D2D デバイスコンテキスト → 合成用スワッ
 
 - ウィンドウは `WS_EX_NOREDIRECTIONBITMAP`（winit の `with_no_redirection_bitmap`）。リダイレクションサーフェスが残っていると、そこが不透明に塗られて背後が透けない
 - `IDCompositionTarget` を**手放さない**。落とすと合成が外れ、描いたものが 1 ドットも出なくなる
-- 背景の塗りだけ `D2D1_PRIMITIVE_BLEND_COPY`。既定の source-over だと `Clear` の 60% の上に 60% を重ねて 84% になり、セルごとに透け方が変わる
+- 背景の塗りだけ `D2D1_PRIMITIVE_BLEND_COPY`。既定の source-over だと `Clear` の 75% の上に 75% を重ねて 94% になり、セルごとに透け方が変わる
 
 セル寸法は DirectWrite に実測させる（`IDWriteFontFace::GetMetrics` と `'M'` の `GetDesignGlyphMetrics`）。ウィンドウはレンダーターゲットより先に要るので、暫定サイズで作ってから実測値で `request_inner_size` し直す。
 
