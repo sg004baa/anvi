@@ -4,7 +4,7 @@
 //!
 //! 掟はひとつだけ: **解けない指定を既定へ黙って落とさない。** 黙って別のフォントで
 //! 描いてしまうと、利用者は `guifont` が効いていないことに気づけない。解けなければ
-//! [`FontSpec::parse`] は `None` を返し、呼び出し側が警告を出して現状維持する。
+//! [`GuiFont::Invalid`] を返し、呼び出し側が警告を出して現状維持する。
 
 /// 同梱フォントのファミリ名。フォールバック鎖の最後尾であり、既定でもある。
 ///
@@ -27,71 +27,116 @@ const DEFAULT_SIZE_PT: f32 = 12.0;
 const MIN_SIZE_PT: f32 = 1.0;
 const MAX_SIZE_PT: f32 = 400.0;
 
+/// `option_set guifont` の解釈結果。
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuiFont {
+    /// 「GUI に任せる」。空文字列、またはサイズを 1 つも含まない候補列。
+    ///
+    /// 後者は **nvim 0.12 の組み込み既定値**
+    /// （`"Cascadia Code,Cascadia Mono,Consolas,Courier New,monospace"`）がこれで、
+    /// 利用者が何も選んでいないことを意味する。警告を出す筋合いはないし、
+    /// 勝手にサイズを当てはめて別のフォントで描くのも違う。
+    Unspecified,
+    /// 解けた指定。
+    Spec(FontSpec),
+    /// 解けない指定。呼び出し側が警告を出して現状維持する。
+    Invalid,
+}
+
 /// 描画に使うフォントの指定。
 ///
-/// `family` は **単一のファミリ名**（DirectWrite に直接渡せる形）で、`guifont` の
-/// `_` は空白へ読み替え済み。鎖（プライマリ + 最終手段）が要るときは
-/// [`FontSpec::fallback_chain`] を使う。
+/// `families` は `guifont` のカンマ区切り候補列を順に並べたもので、`_` は空白へ
+/// 読み替え済み。**先頭から順に「実在する最初のもの」がプライマリ**
+/// （→ [`FontSpec::primary`]）。描画側は鎖（候補列 + 最終手段）を
+/// [`FontSpec::fallback_chain`] で受け取る。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontSpec {
-    pub family: String,
+    pub families: Vec<String>,
     pub size_pt: f32,
 }
 
 impl Default for FontSpec {
     fn default() -> Self {
         Self {
-            family: LAST_RESORT_FAMILY.to_owned(),
+            families: vec![LAST_RESORT_FAMILY.to_owned()],
             size_pt: DEFAULT_SIZE_PT,
         }
     }
 }
 
 impl FontSpec {
-    /// nvim の `guifont`（例 `"UDEV_Gothic:h12"`, `"MS Gothic:h11"`）を解く。
+    /// nvim の `guifont`（例 `"UDEV_Gothic:h12"`, `"A:h12,B:h12"`）を解く。
     ///
-    /// 受け付ける形は `ファミリ名:h<サイズ>` のみ。
+    /// 受け付ける形は `ファミリ名[:h<サイズ>]` のカンマ区切り。
     ///
     /// - `_` は空白として読む（vim 由来の記法）。空白をそのまま含む指定も通る
     ///   （`:set guifont=MS\ Gothic:h11` のバックスラッシュは ex コマンド側で
     ///   消費されるので、オプション値には生の空白が入っている）。
-    /// - サイズは必須。無ければ `None`。「既定サイズで描く」という黙った代替はしない。
-    /// - `:b` / `:i` のような他のオプションが付いていたら `None`。無視して描くと
-    ///   利用者の指定と画面が食い違う。
-    /// - カンマ区切りの候補列（`"A:h12,B:h12"`）は `None`。[`FontSpec`] は単一
-    ///   ファミリしか表現できず、先頭だけ採るのは残りを黙って捨てることになる。
+    /// - サイズは **候補列全体で最初に現れたものを採る**。nvim は実際に使われた
+    ///   フォントのサイズを採るが、どれが使われるかは DirectWrite に訊くまで
+    ///   分からない。食い違うサイズを並べたときの結果を決め打ちで固定しておく。
+    /// - サイズがどこにも無ければ [`GuiFont::Unspecified`]（= GUI に任せる）。
+    /// - `:b` / `:i` のような他のオプションが付いていたら [`GuiFont::Invalid`]。
+    ///   無視して描くと利用者の指定と画面が食い違う。
     #[must_use]
-    pub fn parse(guifont: &str) -> Option<Self> {
+    pub fn parse(guifont: &str) -> GuiFont {
         let spec = guifont.trim();
-        if spec.is_empty() || spec.contains(',') {
-            return None;
+        if spec.is_empty() {
+            return GuiFont::Unspecified;
         }
 
-        let mut parts = spec.split(':');
-        let family = parts.next()?.replace('_', " ");
-        let family = family.trim();
-        if family.is_empty() {
-            return None;
-        }
-
+        let mut families = Vec::new();
         let mut size_pt = None;
-        for opt in parts {
-            let digits = opt.strip_prefix('h')?;
-            if size_pt.is_some() {
-                // `:h12:h14` のような矛盾した指定。どちらを採っても嘘になる。
-                return None;
+        for entry in spec.split(',') {
+            let mut parts = entry.split(':');
+            let Some(family) = parts.next() else {
+                return GuiFont::Invalid;
+            };
+            let family = family.replace('_', " ");
+            let family = family.trim();
+            if family.is_empty() {
+                return GuiFont::Invalid;
             }
-            let value: f32 = digits.parse().ok()?;
-            if !(MIN_SIZE_PT..=MAX_SIZE_PT).contains(&value) {
-                return None;
+
+            let mut entry_size = None;
+            for opt in parts {
+                let Some(digits) = opt.strip_prefix('h') else {
+                    return GuiFont::Invalid;
+                };
+                if entry_size.is_some() {
+                    // `:h12:h14` のような矛盾した指定。どちらを採っても嘘になる。
+                    return GuiFont::Invalid;
+                }
+                let Ok(value) = digits.parse::<f32>() else {
+                    return GuiFont::Invalid;
+                };
+                if !(MIN_SIZE_PT..=MAX_SIZE_PT).contains(&value) {
+                    return GuiFont::Invalid;
+                }
+                entry_size = Some(value);
             }
-            size_pt = Some(value);
+
+            families.push(family.to_owned());
+            size_pt = size_pt.or(entry_size);
         }
 
-        Some(Self {
-            family: family.to_owned(),
-            size_pt: size_pt?,
-        })
+        match size_pt {
+            Some(size_pt) => GuiFont::Spec(Self { families, size_pt }),
+            // サイズを 1 つも持たない候補列は「利用者は何も選んでいない」。
+            None => GuiFont::Unspecified,
+        }
+    }
+
+    /// 候補列のうち **実在する最初のファミリ**。
+    ///
+    /// `exists` はファミリ名を DirectWrite のコレクションで引く述語。どれも無ければ
+    /// `None` を返し、呼び出し側が落とす（黙って別のフォントで描かない）。
+    #[must_use]
+    pub fn primary(&self, exists: impl Fn(&str) -> bool) -> Option<&str> {
+        self.families
+            .iter()
+            .map(String::as_str)
+            .find(|family| exists(family))
     }
 
     /// DirectWrite に渡すファミリ鎖。前から順に「使えるものを使う」。
@@ -101,14 +146,18 @@ impl FontSpec {
     ///
     /// DirectWrite の `CreateTextFormat` はカンマ区切りのファミリ列を解釈しない
     /// （Silverlight や CSS とは違う）。この文字列はレンダラ側が自分で分解し、
-    /// 先頭要素をプライマリとして解決し、残りを `IDWriteFontFallbackBuilder` の
-    /// マッピングに積む。区切りの取り決めをここに閉じ込めるための形である。
+    /// 実在する先頭要素をプライマリとして解決し、残りを `IDWriteFontFallbackBuilder`
+    /// のマッピングに積む。区切りの取り決めをここに閉じ込めるための形である。
     #[must_use]
     pub fn fallback_chain(&self) -> String {
-        if self.family.eq_ignore_ascii_case(LAST_RESORT_FAMILY) {
-            return LAST_RESORT_FAMILY.to_owned();
+        let mut chain: Vec<&str> = self.families.iter().map(String::as_str).collect();
+        if !chain
+            .iter()
+            .any(|family| family.eq_ignore_ascii_case(LAST_RESORT_FAMILY))
+        {
+            chain.push(LAST_RESORT_FAMILY);
         }
-        format!("{}, {LAST_RESORT_FAMILY}", self.family)
+        chain.join(", ")
     }
 }
 
@@ -116,62 +165,102 @@ impl FontSpec {
 mod tests {
     use super::*;
 
+    fn spec(guifont: &str) -> FontSpec {
+        match FontSpec::parse(guifont) {
+            GuiFont::Spec(spec) => spec,
+            other => panic!("解けるはず: {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_underscore_as_space() {
-        let spec = FontSpec::parse("UDEV_Gothic:h12").expect("解けるはず");
-        assert_eq!(spec.family, "UDEV Gothic");
+        let spec = spec("UDEV_Gothic:h12");
+        assert_eq!(spec.families, ["UDEV Gothic"]);
         assert_eq!(spec.size_pt, 12.0);
     }
 
     #[test]
     fn parses_literal_space_in_family() {
-        let spec = FontSpec::parse("MS Gothic:h11").expect("解けるはず");
-        assert_eq!(spec.family, "MS Gothic");
+        let spec = spec("MS Gothic:h11");
+        assert_eq!(spec.families, ["MS Gothic"]);
         assert_eq!(spec.size_pt, 11.0);
     }
 
     #[test]
     fn parses_fractional_size() {
-        let spec = FontSpec::parse("  Cascadia_Mono:h10.5  ").expect("解けるはず");
-        assert_eq!(spec.family, "Cascadia Mono");
+        let spec = spec("  Cascadia_Mono:h10.5  ");
+        assert_eq!(spec.families, ["Cascadia Mono"]);
         assert_eq!(spec.size_pt, 10.5);
     }
 
     #[test]
+    fn parses_a_candidate_list_and_takes_the_first_size() {
+        let spec = spec("UDEV_Gothic:h12,MS_Gothic:h14,Consolas");
+        assert_eq!(spec.families, ["UDEV Gothic", "MS Gothic", "Consolas"]);
+        assert_eq!(spec.size_pt, 12.0);
+    }
+
+    /// nvim 0.12 の組み込み既定値。利用者の指定ではないので警告を出してはいけない。
+    #[test]
+    fn the_nvim_default_guifont_is_not_a_request() {
+        assert_eq!(
+            FontSpec::parse("Cascadia Code,Cascadia Mono,Consolas,Courier New,monospace"),
+            GuiFont::Unspecified
+        );
+    }
+
+    #[test]
+    fn a_family_without_a_size_leaves_the_font_to_the_gui() {
+        assert_eq!(FontSpec::parse(""), GuiFont::Unspecified);
+        assert_eq!(FontSpec::parse("   "), GuiFont::Unspecified);
+        assert_eq!(FontSpec::parse("MS Gothic"), GuiFont::Unspecified);
+    }
+
+    #[test]
     fn rejects_unparsable_specs() {
-        // 空・空白のみ
-        assert_eq!(FontSpec::parse(""), None);
-        assert_eq!(FontSpec::parse("   "), None);
-        // サイズが無い（既定サイズへ黙って落とさない）
-        assert_eq!(FontSpec::parse("MS Gothic"), None);
-        assert_eq!(FontSpec::parse("MS Gothic:"), None);
-        assert_eq!(FontSpec::parse("MS Gothic:h"), None);
-        // サイズが数値でない / 範囲外
-        assert_eq!(FontSpec::parse("MS Gothic:habc"), None);
-        assert_eq!(FontSpec::parse("MS Gothic:h0"), None);
-        assert_eq!(FontSpec::parse("MS Gothic:h-12"), None);
-        assert_eq!(FontSpec::parse("MS Gothic:h1200"), None);
+        // サイズの書き方が壊れている
+        assert_eq!(FontSpec::parse("MS Gothic:"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("MS Gothic:h"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("MS Gothic:habc"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("MS Gothic:h0"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("MS Gothic:h-12"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("MS Gothic:h1200"), GuiFont::Invalid);
         // ファミリ名が無い
-        assert_eq!(FontSpec::parse(":h12"), None);
-        assert_eq!(FontSpec::parse("_:h12"), None);
+        assert_eq!(FontSpec::parse(":h12"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("_:h12"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("A:h12,:h12"), GuiFont::Invalid);
         // 解釈できないオプションが付いている
-        assert_eq!(FontSpec::parse("MS Gothic:h12:b"), None);
-        assert_eq!(FontSpec::parse("MS Gothic:h12:h14"), None);
-        // カンマ区切りの候補列は表現できない
-        assert_eq!(FontSpec::parse("UDEV_Gothic:h12,MS_Gothic:h12"), None);
+        assert_eq!(FontSpec::parse("MS Gothic:h12:b"), GuiFont::Invalid);
+        assert_eq!(FontSpec::parse("MS Gothic:h12:h14"), GuiFont::Invalid);
     }
 
     #[test]
     fn default_is_the_bundled_font() {
         let spec = FontSpec::default();
-        assert_eq!(spec.family, "Moralerspace Argon HW");
+        assert_eq!(spec.families, ["Moralerspace Argon HW"]);
         assert_eq!(spec.size_pt, 12.0);
     }
 
     #[test]
+    fn primary_is_the_first_family_that_exists() {
+        let spec = spec("Missing_One:h12,Missing_Two:h12,Consolas:h12");
+        assert_eq!(
+            spec.primary(|family| family == "Consolas"),
+            Some("Consolas")
+        );
+        assert_eq!(spec.primary(|_| false), None);
+    }
+
+    #[test]
     fn fallback_chain_appends_the_bundled_font() {
-        let spec = FontSpec::parse("UDEV_Gothic:h12").expect("解けるはず");
-        assert_eq!(spec.fallback_chain(), "UDEV Gothic, Moralerspace Argon HW");
+        assert_eq!(
+            spec("UDEV_Gothic:h12").fallback_chain(),
+            "UDEV Gothic, Moralerspace Argon HW"
+        );
+        assert_eq!(
+            spec("A:h12,B:h12").fallback_chain(),
+            "A, B, Moralerspace Argon HW"
+        );
     }
 
     #[test]
@@ -180,7 +269,9 @@ mod tests {
             FontSpec::default().fallback_chain(),
             "Moralerspace Argon HW"
         );
-        let spec = FontSpec::parse("moralerspace_argon_hw:h12").expect("解けるはず");
-        assert_eq!(spec.fallback_chain(), "Moralerspace Argon HW");
+        assert_eq!(
+            spec("moralerspace_argon_hw:h12").fallback_chain(),
+            "moralerspace argon hw"
+        );
     }
 }

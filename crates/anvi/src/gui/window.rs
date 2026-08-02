@@ -31,6 +31,14 @@ const PROVISIONAL_CELL: (f64, f64) = (8.0, 16.0);
 /// ホットキーが押されるまで画面に出てはいけないので `with_visible(false)`、
 /// 起動時にユーザーの作業を奪わないので `with_active(false)`、常駐アプリなので
 /// タスクバーにも出さない。
+///
+/// タイトルバーは出さない（`with_decorations(false)`）。編集中の 1 行に
+/// システムの枠を被せる意味が無く、ウィンドウは中央に出して `ZZ` / `ZQ` で閉じる
+/// ものなので、ボタン類も要らない。
+///
+/// **`with_no_redirection_bitmap(true)` は透過の前提条件**（`WS_EX_NOREDIRECTIONBITMAP`）。
+/// リダイレクションサーフェスがあると、そこが不透明に塗られて背後が透けない。
+/// 実際の合成は [`crate::gui::render`] の DirectComposition が行う。
 pub fn create(event_loop: &ActiveEventLoop, grid: (u16, u16)) -> anyhow::Result<Window> {
     let (cols, rows) = grid;
     let attributes = Window::default_attributes()
@@ -38,11 +46,14 @@ pub fn create(event_loop: &ActiveEventLoop, grid: (u16, u16)) -> anyhow::Result<
         .with_visible(false)
         .with_active(false)
         .with_resizable(true)
+        .with_decorations(false)
+        .with_transparent(true)
         .with_inner_size(LogicalSize::new(
             f64::from(cols) * PROVISIONAL_CELL.0,
             f64::from(rows) * PROVISIONAL_CELL.1,
         ))
-        .with_skip_taskbar(true);
+        .with_skip_taskbar(true)
+        .with_no_redirection_bitmap(true);
     event_loop
         .create_window(attributes)
         .context("failed to create the editor window")
