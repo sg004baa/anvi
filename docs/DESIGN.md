@@ -1,4 +1,4 @@
-# Anywhere Nvim — 設計ドキュメント
+# anvi — 設計ドキュメント
 
 **ステータス:** v2 実装済み（UI 内製。Windows 実機で起動〜取得〜編集〜書き戻しまで確認。IME の実機確認は継続中）
 **対象プラットフォーム:** Windows 11 (x64) 専用
@@ -74,7 +74,7 @@ AI 補完 / スニペット / テンプレート / 編集履歴 / アプリご�
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ anywhere-nvim.exe  (host)                       │
+│ anvi.exe  (host)                       │
 │                                                 │
 │  - トレイアイコン                               │
 │  - グローバルホットキー                         │
@@ -138,7 +138,7 @@ AI 補完 / スニペット / テンプレート / 編集履歴 / アプリご�
 
 **winit 自体は問題なかった。** `src/platform_impl/windows/ime.rs` は `GCS_COMPSTR` に加えて `GCS_COMPATTR` を読み、**変換対象クラスタのバイト範囲つき**で `Ime::Preedit` を配る。`WM_IME_SETCONTEXT` では `ISC_SHOWUICOMPOSITIONWINDOW` を落とし、`WM_IME_COMPOSITION` では `DefWindowProc` を呼ばない ── つまり既にインライン IME として振る舞う。足りなかったのは「preedit を描く UI」だけだった。
 
-**代償:** 端末エミュレータ相当を自前で持つことになる。`grid_line` / `grid_scroll` / `hl_attr_define` / `mode_change` の適用（`anywhere-core` の `ui`）、等幅グリッドの描画（`gui/render.rs`）、キーの nvim 記法への変換（`ui::input`）。ただしそのぶん UI プロセスが消え、v1 で泥仕事だったウィンドウ探索・ツールウィンドウの回避・UI プロセスの生存監視がまるごと不要になった。
+**代償:** 端末エミュレータ相当を自前で持つことになる。`grid_line` / `grid_scroll` / `hl_attr_define` / `mode_change` の適用（`anvi-core` の `ui`）、等幅グリッドの描画（`gui/render.rs`）、キーの nvim 記法への変換（`ui::input`）。ただしそのぶん UI プロセスが消え、v1 で泥仕事だったウィンドウ探索・ツールウィンドウの回避・UI プロセスの生存監視がまるごと不要になった。
 
 **描画に Direct2D/DirectWrite を選んだ理由:** Windows 専用アプリであり、`windows` crate は UIA で既に依存にある。日本語のフォントフォールバックとグリフ品質はシステムの実装がいちばん確実で、GPU スタックを 1 つ増やさずに済む。
 
@@ -215,11 +215,11 @@ AI 補完 / スニペット / テンプレート / 編集履歴 / アプリご�
 ### 5.1 起動コマンド
 
 ```
-set NVIM_APPNAME=anywhere-nvim
+set NVIM_APPNAME=anvi
 nvim.exe --headless --listen 127.0.0.1:%PORT% -u <bundled>\init.lua --noplugin
 ```
 
-`-u` で指定しただけでは bundle ディレクトリは runtimepath に乗らない。**bundled init.lua の先頭で bundle ディレクトリを runtimepath に追加してから `require('anywhere')` すること**（→ 付録 A-1）。
+`-u` で指定しただけでは bundle ディレクトリは runtimepath に乗らない。**bundled init.lua の先頭で bundle ディレクトリを runtimepath に追加してから `require('anvi')` すること**（→ 付録 A-1）。
 
 同梱 init.lua はエントリポイントであり、ローカル設定の読み込み順もここで決まる（→ 5.4）。
 
@@ -244,7 +244,7 @@ UI は host 自身が持つため、同梱する exe は nvim だけ。システ
 
 フォントは `include_bytes!` で exe に入れ、DirectWrite のカスタムフォントコレクションとして使う（`gui/fontset.rs`）。**利用者の環境に何が入っていようと等幅 + 日本語が出ることを保証する**ためで、これが `guifont` 未指定時の既定であり、フォールバック鎖の最後尾でもある。`guifont` でシステムフォントを指定すればそちらが primary になり、そのフォントに無い文字だけ同梱フォントが拾う。
 
-アイコンも exe のリソースとして埋め込む（`build.rs` が名前 ID `1` で入れる）。トレイ・タスクバー・インストーラ・アンインストーラが同じ実体を指す。絵の出典は `scripts/make-icon.py` で、生成物 `assets/anywhere-nvim.ico` をコミットしている。
+アイコンも exe のリソースとして埋め込む（`build.rs` が名前 ID `1` で入れる）。トレイ・タスクバー・インストーラ・アンインストーラが同じ実体を指す。絵の出典は `scripts/make-icon.py` で、生成物 `assets/anvi.ico` をコミットしている。
 
 **セキュリティソフトの除外設定に同梱 exe を追加すること。** ESET を含む多くの製品は、署名のない新規 exe に対してスキャンやプロセス保護を行い、起動遅延やファイルアクセス拒否の原因になる。
 
@@ -264,18 +264,18 @@ UI は host 自身が持つため、同梱する exe は nvim だけ。システ
 
 #### ローカル設定の場所
 
-**専用のディレクトリを新設しない。** `NVIM_APPNAME=anywhere-nvim` を指定している時点で、Neovim の設定ディレクトリは既にこのアプリ専用のものへ切り替わっている。
+**専用のディレクトリを新設しない。** `NVIM_APPNAME=anvi` を指定している時点で、Neovim の設定ディレクトリは既にこのアプリ専用のものへ切り替わっている。
 
 ```lua
-vim.fn.stdpath("config")  -- → $XDG_CONFIG_HOME/anywhere-nvim
-vim.fn.stdpath("data")    -- → $XDG_DATA_HOME/anywhere-nvim-data
+vim.fn.stdpath("config")  -- → $XDG_CONFIG_HOME/anvi
+vim.fn.stdpath("data")    -- → $XDG_DATA_HOME/anvi-data
 ```
 
 **パスをハードコードしないこと。** `stdpath()` から導出すれば、APPNAME を変えたときも追従する。
 
-読み込む対象は `$XDG_CONFIG_HOME/anywhere-nvim/init.lua` の 1 ファイル。存在しなければ何もしない（ローカル設定は完全に任意）。
+読み込む対象は `$XDG_CONFIG_HOME/anvi/init.lua` の 1 ファイル。存在しなければ何もしない（ローカル設定は完全に任意）。
 
-> `XDG_CONFIG_HOME` 未設定時、Windows の Neovim はこれを `%LOCALAPPDATA%` として扱う（`AppData\Roaming` ではない）。したがって既定では `%LOCALAPPDATA%\anywhere-nvim\init.lua`。
+> `XDG_CONFIG_HOME` 未設定時、Windows の Neovim はこれを `%LOCALAPPDATA%` として扱う（`AppData\Roaming` ではない）。したがって既定では `%LOCALAPPDATA%\anvi\init.lua`。
 
 #### 読み込み順
 
@@ -296,7 +296,7 @@ vim.fn.stdpath("data")    -- → $XDG_DATA_HOME/anywhere-nvim-data
 
 ローカル設定から自前モジュールを `require` できるよう、`stdpath("config")` を runtimepath に加える。
 
-**同梱側を prepend、ローカル側を append すること。** 逆にするとローカル側の `lua/anywhere/` が同梱コアを丸ごと隠蔽してしまう。
+**同梱側を prepend、ローカル側を append すること。** 逆にするとローカル側の `lua/anvi/` が同梱コアを丸ごと隠蔽してしまう。
 
 #### 起動コストについて
 
@@ -321,7 +321,7 @@ init.lua は起動時点では host のチャンネル ID を知らない。以�
 
 1. host が TCP で接続する
 2. host が `nvim_get_api_info()` を呼ぶ → 戻り値の第 1 要素が **host 自身のチャンネル ID**
-3. host が `nvim_exec_lua("require('anywhere').set_host(...)", { chan })` を呼んで登録する
+3. host が `nvim_exec_lua("require('anvi').set_host(...)", { chan })` を呼んで登録する
 
 以降 init.lua 側は `vim.rpcnotify(host_chan, ...)` で host に通知できる。
 
@@ -403,7 +403,7 @@ winit の HWND（`raw-window-handle` 経由）に Direct2D の `ID2D1HwndRenderT
 | 表示時 | プライマリモニタ中央へ移動 → `set_visible(true)` → フォーカス（→ 7.3） |
 | 終了時 | `set_visible(false)` → 対象アプリへフォーカス復帰 |
 
-ウィンドウの × はウィンドウを壊さず、`AwQuit`（= `ZQ`、破棄）として nvim へ流す。セッション外の × は無視する。
+ウィンドウの × はウィンドウを壊さず、`AnviQuit`（= `ZQ`、破棄）として nvim へ流す。セッション外の × は無視する。
 
 ### 7.3 フォーカス復帰
 
@@ -501,6 +501,36 @@ Windows アプリから取得するテキストは `\r\n` / `\n` が混在しう
 
 編集前後で内容が一致する場合は書き戻しをスキップする。相手アプリの undo 履歴を無駄に汚さないため。
 
+### 9.5 Chromium 系への複数行の書き戻しは貼り付けにする
+
+結合は常に `\r\n`（`CF_UNICODETEXT` の慣習。旧来の EDIT コントロールもこれを要求する）。
+変えるのは **経路** のほうである。
+
+| 相手 | 行数 | 経路 |
+|---|---|---|
+| Chromium 系（`FrameworkId == "Chrome"`。Chrome / Edge / Electron） | 2 行以上 | 貼り付け |
+| Chromium 系 | 1 行 | `SetValue`（改行が無いので問題は起きない。クリップボードを奪わない） |
+| それ以外 | 何行でも | `SetValue` |
+
+Slack の入力欄は `contenteditable` でありながら書き込み可能な `ValuePattern` を持つため、
+素直に書くと `SetValue` 経路に乗る。ところが **Chromium の `SetValue` は改行のたびに段落を
+割る**。段落は平文化すると空行になるので、1 回の書き戻しごとに改行が増えていく。
+
+実測（2026-08-02, Slack デスクトップ）:
+
+| やったこと | 入力欄の中身（`Ctrl+A` `Ctrl+C` で確認） |
+|---|---|
+| 手で `"AAA\r\nBBB"` を `Ctrl+V` | `AAA\nBBB` ✅ |
+| `SetValue("AAA\r\nBBB")` | `AAA\n\nBBB` ❌ |
+| `SetValue("AAA\nBBB")` | `AAA\n\nBBB` ❌（`\r` の有無は無関係） |
+| 貼り付け経路へ変更後 | `AAA\nBBB` ✅ |
+
+取得側は無実（Slack から `Ctrl+C` すると `AAA\nBBB`）。**`\n` へ変えるだけでは直らない**
+ことを確認済みなので、ここを「改行コードの問題」として蒸し返さないこと。
+
+判定材料はログに出す（`captured route=Value framework="Chrome"`）。相手が増えたら
+まずこの行を見ること。
+
 ---
 
 ## 10. 既知の限界
@@ -509,9 +539,12 @@ Windows アプリから取得するテキストは `\r\n` / `\n` が混在しう
 
 ### 10.1 Electron 系アプリ（Slack / Discord など）
 
-`contenteditable` で実装されているため `ValuePattern` を持たない。`TextPattern` は読み取り専用のため書き戻しに使えない。結果としてクリップボード貼り付けに落ちる。
+`contenteditable` だが、**書き込み可能な `ValuePattern` は持っている**（Slack で実測。
+`FrameworkId = "Chrome"`）。ただし `SetValue` は改行のたびに段落を割るため、複数行は
+貼り付けで書き戻す（→ 9.5）。
 
-**Electron 系は最初から別枠として扱うこと。** 救えない。
+つまり救えないわけではない。ただし貼り付け経路である以上、クリップボードを一時的に
+奪う（→ 10.4）ことと、10.2 の連投事故は残る。
 
 ### 10.2 改行が送信になるアプリ
 
@@ -575,6 +608,26 @@ COM のアパートメント地雷を踏まないこと。
 
 これを混ぜると「特定のアプリでのみ、なぜかハングする」という原因究明が極めて困難な不具合が発生する。最初から分けること。
 
+### 11.3 コンソールとログ
+
+host は **GUI サブシステム**（`#![windows_subsystem = "windows"]`）。常駐ツールが起動の
+たびにコンソールウィンドウを開いては使い物にならない。結果として次の 2 つが要る。
+
+- ログは stderr ではなく `%LOCALAPPDATA%\anvi-data\log\anvi.log` へ書く。起動のたびに
+  切り詰める（常駐は 1 インスタンス。知りたいのは常に「今動いているもの」）
+- nvim の子プロセスは `CREATE_NO_WINDOW` で起動する。コンソールを持たない親から
+  コンソールアプリを起動すると、**子が自分でコンソールウィンドウを開く**
+
+### 11.4 トレイメニュー
+
+`サインイン時に起動`（チェック）と `Exit` の 2 項目。チェックの実体は
+`HKCU\...\CurrentVersion\Run` の `anvi` 値で、**インストーラの `startup` タスクと同じ
+エントリ**（→ 13.1）。portable / scoop にはインストーラが無いので、ここが唯一の入口になる。
+
+`muda` のイベントハンドラは `Fn + Send` を要求するためメニュー項目そのものを掴めない。
+ハンドラは `UserEvent::ToggleAutostart` を投げるだけにして、レジストリ操作と
+（失敗時の）チェック戻しはイベントループのスレッドで `Tray` が行う。
+
 ---
 
 ## 12. 実装順序
@@ -628,7 +681,7 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 
 同梱コアが安定してから入れる。実装量は小さい（→ 付録 A-1）。
 
-- `$XDG_CONFIG_HOME/anywhere-nvim/init.lua` があれば `pcall` で読む
+- `$XDG_CONFIG_HOME/anvi/init.lua` があれば `pcall` で読む
 - 読み込み後に `enforce_contract()` を呼ぶ
 - 検証: ローカル設定で `ZZ` を潰す → 再宣言で戻ることを確認
 - 検証: ローカル設定に文法エラーを仕込む → アプリが起動し、host に `init_error` が届くことを確認
@@ -645,32 +698,32 @@ Neovide の IME が使い物にならなかったため実施（→ 4.2）。順
 
 ## 13. 配布
 
-配布物は 2 つ。中身（`stage/anywhere-nvim`）は完全に同一で、包み方だけが違う。
+配布物は 2 つ。中身（`stage/anvi`）は完全に同一で、包み方だけが違う。
 
 | 形式 | 資産名 | 用途 |
 |---|---|---|
-| portable zip | `anywhere-nvim-vX.Y.Z-windows-x64-portable.zip` | 展開して置くだけ。scoop もこれを使う |
-| インストーラ | `anywhere-nvim-vX.Y.Z-windows-x64-setup.exe` | 自動起動・スタートメニュー・アンインストーラが要る場合 |
+| portable zip | `anvi-vX.Y.Z-windows-x64-portable.zip` | 展開して置くだけ。scoop もこれを使う |
+| インストーラ | `anvi-vX.Y.Z-windows-x64-setup.exe` | 自動起動・スタートメニュー・アンインストーラが要る場合 |
 
 どちらもタグ push（`v[0-9]+.[0-9]+.[0-9]+*`）で `release.yml` が作る。ワークスペースの
 version とタグが食い違っていれば `verify-version` がその場で落とす。
 
-### 13.1 インストーラ（`installer/anywhere-nvim.iss`, Inno Setup 6）
+### 13.1 インストーラ（`installer/anvi.iss`, Inno Setup 6）
 
-- インストール先は `%LOCALAPPDATA%\Programs\anywhere-nvim`。**管理者権限を要求しない**
+- インストール先は `%LOCALAPPDATA%\Programs\anvi`。**管理者権限を要求しない**
   （`PrivilegesRequired=lowest`）。個人ツールに UAC を挟む理由が無い
 - タスク `startup`（既定 ON）が `HKCU\...\CurrentVersion\Run` に登録する。常駐しない
   ホットキーツールは使い物にならないので既定は ON、ウィザードで外せる
-- **上書きインストール前に `taskkill /F /T /IM anywhere-nvim.exe` で常駐を落とす。**
+- **上書きインストール前に `taskkill /F /T /IM anvi.exe` で常駐を落とす。**
   `×` はセッションの破棄であってアプリの終了ではない（→ 7.2）ため、再起動マネージャに
   任せると閉じられずに止まる。`CloseApplications=no` はそのための明示指定
-- アンインストールは既定でユーザーデータ（`%LOCALAPPDATA%\anywhere-nvim` のローカル設定と
-  `%LOCALAPPDATA%\anywhere-nvim-data` の shada/state）も消す。`/KEEPDATA` を付けると残す。
+- アンインストールは既定でユーザーデータ（`%LOCALAPPDATA%\anvi` のローカル設定と
+  `%LOCALAPPDATA%\anvi-data` の shada/state）も消す。`/KEEPDATA` を付けると残す。
   対話時は MsgBox で確認する（`/SUPPRESSMSGBOXES` は `MsgBox` を抑止しないので、
   MsgBox は必ず `UninstallSilent` が偽の枝にだけ置くこと）
-- インストール先（`Programs\anywhere-nvim`）とローカル設定（`anywhere-nvim`）は別物。
+- インストール先（`Programs\anvi`）とローカル設定（`anvi`）は別物。
   前者にはアンインストーラ以外触らない
-- ウィザードのアイコンは `assets/anywhere-nvim.ico`、ライセンスページは `LICENSE-MIT`
+- ウィザードのアイコンは `assets/anvi.ico`、ライセンスページは `LICENSE-MIT`
   （Apache-2.0 はインストール先の `LICENSE-APACHE`。→ 13.3）
 
 release.yml は毎回サイレントで「インストール → 配置と Run 値の確認 → `/KEEPDATA` で
@@ -680,12 +733,12 @@ release.yml は毎回サイレントで「インストール → 配置と Run �
 
 ### 13.2 scoop（個人 bucket）
 
-`sg004baa/scoop-bucket` の `bucket/anywhere-nvim.json`。portable zip を `extract_dir`
-`anywhere-nvim` で展開し、`bin` と `shortcuts` に `anywhere-nvim.exe` を出す。
+`sg004baa/scoop-bucket` の `bucket/anvi.json`。portable zip を `extract_dir`
+`anvi` で展開し、`bin` と `shortcuts` に `anvi.exe` を出す。
 `checkver: github` + `autoupdate`（hash は `$url.sha256`）で追従する。
 
 scoop 経路では自動起動もアンインストール時のデータ削除も行われない。ユーザーデータは
-アプリディレクトリの外（`%LOCALAPPDATA%\anywhere-nvim*`）にあるので、更新でも
+アプリディレクトリの外（`%LOCALAPPDATA%\anvi*`）にあるので、更新でも
 `scoop uninstall` でも消えない。消したければ手で消す。
 
 ### 13.3 ライセンス
@@ -695,7 +748,7 @@ scoop 経路では自動起動もアンインストール時のデータ削除�
 
 | 再配布するもの | ライセンス | 置き場所 |
 |---|---|---|
-| anywhere-nvim 本体 | MIT OR Apache-2.0 | `LICENSE-MIT` / `LICENSE-APACHE` |
+| anvi 本体 | MIT OR Apache-2.0 | `LICENSE-MIT` / `LICENSE-APACHE` |
 | Moralerspace Argon HW（exe に埋め込み） | SIL Open Font License 1.1 | `LICENSE-Moralerspace.txt` |
 | Neovim | Apache-2.0 | `nvim/LICENSE.txt`（release.yml が同じタグから取る） |
 
@@ -710,17 +763,17 @@ scoop 経路では自動起動もアンインストール時のデータ削除�
 ```lua
 -- <bundled>/init.lua
 
--- 同梱ディレクトリは prepend（ローカル側に lua/anywhere/ があっても隠蔽されないよう先に置く）
+-- 同梱ディレクトリは prepend（ローカル側に lua/anvi/ があっても隠蔽されないよう先に置く）
 local bundle = vim.fs.dirname(debug.getinfo(1, "S").source:sub(2))
 vim.opt.runtimepath:prepend(bundle)
 
-local aw = require("anywhere")
+local aw = require("anvi")
 
 -- 1. 同梱コア。契約を確立する
 aw.setup()
 
 -- 2. ローカル設定（任意）。壊れていても起動を止めない
-local cfg_dir  = vim.fn.stdpath("config")            -- = $XDG_CONFIG_HOME/anywhere-nvim
+local cfg_dir  = vim.fn.stdpath("config")            -- = $XDG_CONFIG_HOME/anvi
 local cfg_file = vim.fs.joinpath(cfg_dir, "init.lua")
 
 if vim.uv.fs_stat(cfg_file) then
@@ -742,7 +795,7 @@ aw.enforce_contract()
 ### A-2. コアモジュール
 
 ```lua
--- <bundled>/lua/anywhere/init.lua
+-- <bundled>/lua/anvi/init.lua
 
 local M = {
   host = nil,  -- host の RPC チャンネル ID
@@ -782,7 +835,7 @@ function M.start_session(lines, filetype)
   vim.bo[buf].buftype  = "acwrite"
   vim.bo[buf].filetype = filetype or ""
   vim.bo[buf].modified = false
-  vim.api.nvim_buf_set_name(buf, "anywhere://edit")
+  vim.api.nvim_buf_set_name(buf, "anvi://edit")
 
   -- :w を乗っ取る。ディスクには書かない
   vim.api.nvim_create_autocmd("BufWriteCmd", {
@@ -805,13 +858,13 @@ end
 
 --- 同梱コア。ローカル設定より前に一度だけ呼ぶ
 function M.setup()
-  -- bang = true は必須。`:q!` は abbrev 展開で「AwQuit!」の形になるため
-  vim.api.nvim_create_user_command("AwWriteQuit", function()
+  -- bang = true は必須。`:q!` は abbrev 展開で「AnviQuit!」の形になるため
+  vim.api.nvim_create_user_command("AnviWriteQuit", function()
     vim.cmd("write")   -- BufWriteCmd 経由で内容が host に渡る
     finish()
   end, { bang = true })
 
-  vim.api.nvim_create_user_command("AwQuit", function()
+  vim.api.nvim_create_user_command("AnviQuit", function()
     finish()
   end, { bang = true })
 
@@ -822,8 +875,8 @@ end
 --- 順序に対して脆いのはここに集約されている 3 つだけ
 function M.enforce_contract()
   -- 1. キーマップ
-  vim.keymap.set("n", "ZZ", "<Cmd>AwWriteQuit<CR>")
-  vim.keymap.set("n", "ZQ", "<Cmd>AwQuit<CR>")
+  vim.keymap.set("n", "ZZ", "<Cmd>AnviWriteQuit<CR>")
+  vim.keymap.set("n", "ZQ", "<Cmd>AnviQuit<CR>")
 
   -- 2. :q 系の乗っ取り（網羅的ではない。抜けたら追加する）
   local function abbr(lhs, rhs)
@@ -831,14 +884,14 @@ function M.enforce_contract()
       :format(lhs, lhs, rhs, lhs))
   end
 
-  abbr("q",  "AwQuit")
-  abbr("q!", "AwQuit")
-  abbr("wq", "AwWriteQuit")
-  abbr("x",  "AwWriteQuit")
+  abbr("q",  "AnviQuit")
+  abbr("q!", "AnviQuit")
+  abbr("wq", "AnviWriteQuit")
+  abbr("x",  "AnviWriteQuit")
 
   -- 3. 安全網: 乗っ取りを抜けて本当に終了しようとした場合
   --    clear = true で二重登録を防ぐ（再宣言されうるため）
-  local grp = vim.api.nvim_create_augroup("AnywhereContract", { clear = true })
+  local grp = vim.api.nvim_create_augroup("AnviContract", { clear = true })
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = grp,
     callback = function()
@@ -862,7 +915,7 @@ return M
 let port = pick_free_port();  // TOCTOU: nvim の bind 失敗時は取り直して再試行（→ 4.6）
 
 let nvim_child = Command::new(bundled("nvim.exe"))
-    .env("NVIM_APPNAME", "anywhere-nvim")
+    .env("NVIM_APPNAME", "anvi")
     .args(["--headless", "--listen", &format!("127.0.0.1:{port}")])
     .args(["-u", &bundled("init.lua"), "--noplugin"])
     .spawn()?;
@@ -871,7 +924,7 @@ let nvim = connect_tcp_with_retry(port).await?;  // nvim-rs。nvim が listen �
 
 // 自分のチャンネル ID を取得して init.lua に登録させる
 let (chan, _api) = nvim.get_api_info().await?;
-nvim.exec_lua("require('anywhere').set_host(...)", vec![chan.into()]).await?;
+nvim.exec_lua("require('anvi').set_host(...)", vec![chan.into()]).await?;
 
 // UI クライアントとしても同じ接続を使う（→ 3.3）
 nvim.ui_attach(cols, rows, &opts /* rgb + ext_linegrid */).await?;
@@ -924,7 +977,7 @@ match state.phase {
         state.target   = target;
         state.original = text.clone();
         state.written  = None;   // セッション毎に必ずリセット
-        nvim.exec_lua("require('anywhere').start_session(...)", ...).await?;
+        nvim.exec_lua("require('anvi').start_session(...)", ...).await?;
         show_and_focus(editor_window);
         state.phase = Phase::Editing;
     }
@@ -938,7 +991,7 @@ match state.phase {
 
 | 語 | 意味 |
 |---|---|
-| host | `anywhere-nvim.exe`。本アプリ本体 |
+| host | `anvi.exe`。本アプリ本体 |
 | セッション | ホットキー押下から書き戻し完了までの一連の流れ |
 | ペア | 常駐 nvim と、その RPC 接続（host イベントと `redraw` が相乗りする）の組 |
 | 対象 (target) | 編集元となる、フォーカス中の入力欄とそのウィンドウ |

@@ -29,8 +29,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      # anywhere-nvim は Windows 専用なので Linux では core だけ見る（→ windows ジョブ）。
-      - run: cargo clippy -p anywhere-core --all-targets --locked -- -D warnings
+      # anvi は Windows 専用なので Linux では core だけ見る（→ windows ジョブ）。
+      - run: cargo clippy -p anvi-core --all-targets --locked -- -D warnings
 
   test-core:
     name: test (core, linux)
@@ -45,9 +45,9 @@ jobs:
         with:
           neovim: true
           version: ${{ env.NVIM_VERSION }}
-      - run: cargo test -p anywhere-core --locked
+      - run: cargo test -p anvi-core --locked
         env:
-          ANYWHERE_TEST_NVIM: ${{ steps.nvim.outputs.executable }}
+          ANVI_TEST_NVIM: ${{ steps.nvim.outputs.executable }}
 
   windows:
     name: clippy + test (workspace, windows)
@@ -66,4 +66,4 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
         env:
-          ANYWHERE_TEST_NVIM: ${{ steps.nvim.outputs.executable }}
+          ANVI_TEST_NVIM: ${{ steps.nvim.outputs.executable }}

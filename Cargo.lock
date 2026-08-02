@@ -72,30 +72,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "anywhere-core"
-version = "0.1.2"
+name = "anvi"
+version = "0.2.0"
 dependencies = [
+ "anvi-core",
  "anyhow",
- "async-trait",
- "nvim-rs",
- "rmpv",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "anywhere-nvim"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "anywhere-core",
  "global-hotkey",
  "raw-window-handle",
  "rmpv",
@@ -108,6 +89,25 @@ dependencies = [
  "winit",
  "winresource",
 ]
+
+[[package]]
+name = "anvi-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nvim-rs",
+ "rmpv",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arrayref"

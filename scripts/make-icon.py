@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""assets/anywhere-nvim.ico を生成する。
+"""assets/anvi.ico を生成する。
 
 アイコンの絵はここが唯一の出典。exe に埋め込まれた ICO をトレイも使う
 （`tray.rs` は `Icon::from_resource(1, ...)` で読むだけ）ので、絵を変えるなら
@@ -111,7 +111,7 @@ def as_png(px: list[list[tuple[int, int, int, int]]]) -> bytes:
 
 
 def main() -> None:
-    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / "assets" / "anywhere-nvim.ico"
+    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / "assets" / "anvi.ico"
     images = []
     for size in SIZES:
         px = render(size)
