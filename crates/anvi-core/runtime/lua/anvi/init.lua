@@ -13,19 +13,26 @@ local function notify(event, payload)
   end
 end
 
---- 起動時のエラー報告。この時点ではまだ host が接続していないので溜めておく
-M.pending_errors = {}
+--- 起動時の報告。この時点ではまだ host が接続していないので溜めておく。
+--- `{ event, payload }` の並びで、届いた順にそのまま流す
+M.pending = {}
+
 function M.report_error(kind, msg)
-  table.insert(M.pending_errors, { kind = kind, message = msg })
+  table.insert(M.pending, { event = "init_error", payload = { kind = kind, message = msg } })
+end
+
+--- ローカル設定をどこに探しに行ったか。パスを決めるのは nvim なので host は聞くだけ
+function M.report_config(dir, loaded)
+  table.insert(M.pending, { event = "config_resolved", payload = { dir = dir, loaded = loaded } })
 end
 
 --- host が接続時に呼ぶ
 function M.set_host(chan)
   M.host = chan
-  for _, e in ipairs(M.pending_errors) do
-    notify("init_error", e) -- host 側でログに出す
+  for _, e in ipairs(M.pending) do
+    notify(e.event, e.payload) -- host 側でログに出す
   end
-  M.pending_errors = {}
+  M.pending = {}
 end
 
 --- host がセッション開始時に呼ぶ

@@ -14,7 +14,7 @@ Slack のメッセージ欄でも、ブラウザのテキストエリアでも�
 
 ### インストーラ
 
-[Releases](https://github.com/sg004baa/anywhere-nvim/releases) の
+[Releases](https://github.com/sg004baa/anvi/releases) の
 `anvi-vX.Y.Z-windows-x64-setup.exe`。管理者権限は要らない
 （`%LOCALAPPDATA%\Programs\anvi` へ入る）。サインイン時の自動起動はウィザードで選べる。
 
@@ -59,10 +59,20 @@ nvim はアプリの起動時に一度だけ立ち上がり、セッションを
 
 ### Neovim のローカル設定
 
-`%LOCALAPPDATA%\anvi\init.lua` があれば読む。普段使いの `nvim` の設定とは完全に別。
+場所を決めるのは anvi ではなく Neovim である。`NVIM_APPNAME=anvi` で動くので
+`stdpath("config")`、つまり **`%XDG_CONFIG_HOME%\anvi\init.lua`**。
+`XDG_CONFIG_HOME` を設定していなければ Windows の Neovim はそこを `%LOCALAPPDATA%`
+として扱うので **`%LOCALAPPDATA%\anvi\init.lua`** になる（`AppData\Roaming` ではない）。
+普段使いの `nvim` の設定とは完全に別。
+
+**どちらを見に行ったかは起動時のログに必ず出る。** 効いていないと思ったらまずこれを見る:
+
+```
+INFO anvi::controller: local config dir="C:\Users\you\.config\anvi" loaded=false
+```
 
 ```lua
--- %LOCALAPPDATA%\anvi\init.lua
+-- <上のログが指すディレクトリ>\init.lua
 vim.opt.guifont = "Moralerspace Argon HW:h14"
 vim.keymap.set("n", "<C-s>", "<Cmd>write<CR>")
 ```

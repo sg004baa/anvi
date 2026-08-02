@@ -456,7 +456,8 @@ impl Renderer {
         let row = ui.cursor.row;
         let cells = ui.grid.row(row);
 
-        // カーソルが全角の続きセルに乗ったら本体セルへ寄せる。
+        // カーソルが全角の続きセルに乗ったら本体セルへ寄せる。空文字列が「続き」を
+        // 意味するのは、消去済みセルが空白 1 文字だから（`Cell::BLANK`）。
         let col = if cells[ui.cursor.col].text.is_empty() && ui.cursor.col > 0 {
             ui.cursor.col - 1
         } else {

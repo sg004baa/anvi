@@ -81,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
                 );
                 break;
             }
+            HostEvent::ConfigResolved { dir, loaded } => {
+                println!("[config] {dir} (loaded={loaded})");
+            }
             HostEvent::InitError { kind, message } => {
                 println!("[init_error] {kind}: {message}");
             }

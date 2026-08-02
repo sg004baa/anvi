@@ -231,6 +231,10 @@ impl Controller {
             // 保持するだけ。書き戻しはセッション終了時（DESIGN 4.4）。
             HostEvent::SessionWrite(lines) => self.session.on_write(lines),
             HostEvent::SessionEnd => self.finish_session(),
+            // 「設定が効かない」はここを見れば終わる（DESIGN 5.4）。
+            HostEvent::ConfigResolved { dir, loaded } => {
+                tracing::info!(dir, loaded, "local config");
+            }
             // ローカル設定の読み込み失敗。起動は続行済み（DESIGN 5.4）。
             HostEvent::InitError { kind, message } => {
                 tracing::warn!(kind, message, "user config error");

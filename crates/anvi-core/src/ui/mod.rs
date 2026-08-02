@@ -20,6 +20,13 @@ pub struct CellText {
 }
 
 impl CellText {
+    /// 空白 1 文字。消去済みセルの中身。
+    pub const SPACE: Self = {
+        let mut buf = [0u8; MAX_CELL_BYTES];
+        buf[0] = b' ';
+        Self { buf, len: 1 }
+    };
+
     /// `MAX_CELL_BYTES` に収まらない分は文字境界で切り捨てる。
     #[must_use]
     pub fn new(s: &str) -> Self {
@@ -41,6 +48,8 @@ impl CellText {
         std::str::from_utf8(&self.buf[..self.len as usize]).unwrap_or("")
     }
 
+    /// **空文字列は「全角の続き」だけを意味する。** 未描画・消去済みのセルは
+    /// 空白 1 文字（[`Cell::BLANK`]）であり、ここで真にはならない。
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -51,10 +60,29 @@ impl CellText {
 ///
 /// 全角文字は「本体セル + 空文字列セル」の 2 セルで表現される（nvim の規約そのまま）。
 /// 空文字列セルは直前のセルの続きであり、描画側は読み飛ばす。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+///
+/// **消去されたセルは空文字列ではなく空白 1 文字**（[`Cell::BLANK`]）。nvim は
+/// `grid_clear` や `grid_resize` のあと空白セルを送り直さないので、既定値を空文字列に
+/// すると「未描画」と「全角の続き」が区別できなくなり、行末のカーソルが 1 セル
+/// 左へずれる。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub text: CellText,
     pub hl_id: u32,
+}
+
+impl Cell {
+    /// 消去済みのセル。既定ハイライトの空白。
+    pub const BLANK: Self = Self {
+        text: CellText::SPACE,
+        hl_id: 0,
+    };
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self::BLANK
+    }
 }
 
 /// 文字グリッド。`grid_resize` の度に張り直す。
@@ -66,12 +94,13 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// 全セルが空白の新しいグリッド。
     #[must_use]
     pub fn new(cols: usize, rows: usize) -> Self {
         Self {
             cols,
             rows,
-            cells: vec![Cell::default(); cols * rows],
+            cells: vec![Cell::BLANK; cols * rows],
         }
     }
 
@@ -104,8 +133,9 @@ impl Grid {
         &mut self.cells[start..end]
     }
 
+    /// 全セルを空白へ戻す。nvim はこの後で空白セルを送り直さない。
     pub fn clear(&mut self) {
-        self.cells.fill(Cell::default());
+        self.cells.fill(Cell::BLANK);
     }
 
     /// `src` 行の `[left, right)` を `dst` 行の同じ列へ写す。`grid_scroll` 専用。
@@ -126,6 +156,7 @@ impl Grid {
     }
 
     /// 行のテキスト（全角の続きセルは飛ばす）。テストと検証用。
+    /// 行末までの空白がそのまま入るので、比較する側で `trim_end` すること。
     #[must_use]
     pub fn row_text(&self, row: usize) -> String {
         let mut out = String::new();

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use anvi_core::{NvimConfig, NvimHandles, NvimServer};
+use anvi_core::{HostEvent, NvimConfig, NvimHandles, NvimServer};
 use rmpv::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -125,10 +125,13 @@ async fn attach_ui_streams_redraw_batches_containing_grid_line() {
     );
 
     // host イベント経路は redraw に汚染されない（`redraw` は HostEvent にしない）。
-    assert!(
-        handles.host.try_recv().is_err(),
-        "a redraw notification leaked into the host event channel"
-    );
+    // 起動時の `ConfigResolved` だけは通る。
+    while let Ok(event) = handles.host.try_recv() {
+        assert!(
+            matches!(event, HostEvent::ConfigResolved { .. }),
+            "a redraw notification leaked into the host event channel: {event:?}"
+        );
+    }
 
     server.shutdown().await.expect("shutdown");
 }

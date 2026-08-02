@@ -58,6 +58,10 @@ fn runtime_dir() -> PathBuf {
 }
 
 /// nvim を起こし、host のイベント受信口と検証用 RPC クライアントを返す。
+///
+/// 起動直後に必ず 1 つだけ届く `ConfigResolved` はここで受け取り、契約
+/// （解決先は `NVIM_APPNAME` の設定ディレクトリ、`loaded` は実在と一致）を
+/// 全テスト共通で検証する。以降のイベント列は呼び出し側が読む。
 async fn start(appname: &str) -> (NvimServer, UnboundedReceiver<HostEvent>, Client) {
     LazyLock::force(&XDG_ROOT);
     let cfg = NvimConfig {
@@ -71,7 +75,16 @@ async fn start(appname: &str) -> (NvimServer, UnboundedReceiver<HostEvent>, Clie
     let (client, _io) = nvim_rs::create::tokio::new_tcp(("127.0.0.1", server.port()), Dummy::new())
         .await
         .expect("connect the verification client to nvim");
-    (server, handles.host, client)
+    let mut events = handles.host;
+    let expected = config_dir(appname);
+    match expect_event(&mut events).await {
+        HostEvent::ConfigResolved { dir, loaded } => {
+            assert_eq!(PathBuf::from(dir), expected);
+            assert_eq!(loaded, expected.join("init.lua").is_file());
+        }
+        other => panic!("the first host event must resolve the config dir, got {other:?}"),
+    }
+    (server, events, client)
 }
 
 async fn start_session(server: &NvimServer, lines: &[String]) {

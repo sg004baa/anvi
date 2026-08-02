@@ -543,7 +543,8 @@ mod tests {
             )],
         )
         .expect("apply");
-        assert_eq!(texts(&state, 0), vec!["", "x", "x", "x", "y", ""]);
+        // 触られていない両端は空白。空文字列は全角の続きにしか使わない。
+        assert_eq!(texts(&state, 0), vec![" ", "x", "x", "x", "y", " "]);
     }
 
     #[test]
@@ -565,6 +566,26 @@ mod tests {
         .expect("apply");
         assert_eq!(texts(&state, 0), vec!["あ", "", "い", ""]);
         assert_eq!(state.grid.row_text(0), "あい");
+    }
+
+    /// 行末のカーソルが 1 セル左へずれていた原因。描画側は「空文字列 = 全角の続き」と
+    /// 読んでカーソルを寄せるので、**未描画・消去済みのセルが空文字列であってはならない**。
+    /// nvim は `grid_clear` / `grid_resize` のあと空白セルを送り直さない。
+    #[test]
+    fn untouched_and_cleared_cells_are_blanks_not_continuations() {
+        let mut state = sized(4, 1);
+        assert_eq!(texts(&state, 0), vec![" ", " ", " ", " "]);
+
+        apply(&mut state, &[line(0, 0, vec![cell("a", Some(0), None)])]).expect("apply");
+        // 書いたのは 1 セルだけ。右隣は全角の続きではない。
+        assert_eq!(texts(&state, 0), vec!["a", " ", " ", " "]);
+
+        apply(
+            &mut state,
+            &[event("grid_clear", vec![vec![Value::from(GRID)]])],
+        )
+        .expect("apply");
+        assert_eq!(texts(&state, 0), vec![" ", " ", " ", " "]);
     }
 
     #[test]
@@ -883,7 +904,8 @@ mod tests {
         .expect("apply");
         assert!(!outcome.resized);
         assert_eq!((state.grid.cols(), state.grid.rows()), (4, 1));
-        assert_eq!(state.grid.row_text(0), "");
+        // 他グリッド宛ての書き込みは 1 セルも届かない = 全部が空白のまま。
+        assert_eq!(state.grid.row_text(0), "    ");
     }
 
     #[test]
