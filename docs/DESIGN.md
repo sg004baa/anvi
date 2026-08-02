@@ -244,6 +244,19 @@ UI は host 自身が持つため、同梱する exe は nvim だけ。システ
 
 フォントは `include_bytes!` で exe に入れ、DirectWrite のカスタムフォントコレクションとして使う（`gui/fontset.rs`）。**利用者の環境に何が入っていようと等幅 + 日本語が出ることを保証する**ためで、これが `guifont` 未指定時の既定であり、フォールバック鎖の最後尾でもある。`guifont` でシステムフォントを指定すればそちらが primary になり、そのフォントに無い文字だけ同梱フォントが拾う。
 
+`guifont` の読み方は 3 通りしかない（`gui/font.rs` の `GuiFont`）。
+
+| 値 | 扱い |
+|---|---|
+| `A:h12` / `A:h12,B:h12`（サイズあり） | その指定。候補列は **実在する先頭のファミリ**が primary、残りはフォールバック鎖 |
+| 空文字列、`A,B`（サイズがどこにも無い） | **GUI に任せる** = 同梱フォント |
+| `A:h12:b` / `A:habc` など | 解けない。現状維持 + 警告 |
+
+**サイズの無い候補列を警告にしてはいけない。** nvim 0.12 の `guifont` の組み込み既定値が
+`"Cascadia Code,Cascadia Mono,Consolas,Courier New,monospace"` であり、これは
+`ui_attach` 直後に必ず `option_set` で飛んでくる。利用者が何も選んでいないことの
+表明なので、起動のたびに警告を出すのは誤報にしかならない。
+
 アイコンも exe のリソースとして埋め込む（`build.rs` が名前 ID `1` で入れる）。トレイ・タスクバー・インストーラ・アンインストーラが同じ実体を指す。絵の出典は `scripts/make-icon.py` で、生成物 `assets/anvi.ico` をコミットしている。
 
 **セキュリティソフトの除外設定に同梱 exe を追加すること。** ESET を含む多くの製品は、署名のない新規 exe に対してスキャンやプロセス保護を行い、起動遅延やファイルアクセス拒否の原因になる。
@@ -403,7 +416,26 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
 
 winit で作る。`visible=false` / `active=false` / `skip_taskbar=true` で、**作った時点では画面に出ないしフォーカスも奪わない**。v1 の「画面外へ飛ばしてから隠す」待避は不要になった。
 
-winit の HWND（`raw-window-handle` 経由）に Direct2D の `ID2D1HwndRenderTarget` を載せる。セル寸法は DirectWrite に実測させる（`IDWriteFontFace::GetMetrics` と `'M'` の `GetDesignGlyphMetrics`）。ウィンドウはレンダーターゲットより先に要るので、暫定サイズで作ってから実測値で `request_inner_size` し直す。
+**タイトルバーは出さない**（`decorations=false`）。中央に出して `ZZ` / `ZQ` で閉じる 1 枚窓であり、閉じる・最大化のボタンにも枠にも役割が無い。
+
+#### 透過（背景のみ）
+
+背景は不透明度 60%（`render.rs` の `BACKGROUND_ALPHA`）。**透かすのは背景だけで、文字・カーソル・preedit は不透明のまま**にする。下に何が来るか分からない以上、文字まで透かすと読めなくなる。
+
+そのために出力経路が HWND 直付けではない。`ID2D1HwndRenderTarget` は `D2D1_ALPHA_MODE_IGNORE` しか取れず、**アルファを持てない**。
+
+```
+D3D11 デバイス → D2D デバイスコンテキスト → 合成用スワップチェーン
+  → IDCompositionVisual → IDCompositionTarget(HWND)
+```
+
+付随する掟が 3 つある。
+
+- ウィンドウは `WS_EX_NOREDIRECTIONBITMAP`（winit の `with_no_redirection_bitmap`）。リダイレクションサーフェスが残っていると、そこが不透明に塗られて背後が透けない
+- `IDCompositionTarget` を**手放さない**。落とすと合成が外れ、描いたものが 1 ドットも出なくなる
+- 背景の塗りだけ `D2D1_PRIMITIVE_BLEND_COPY`。既定の source-over だと `Clear` の 60% の上に 60% を重ねて 84% になり、セルごとに透け方が変わる
+
+セル寸法は DirectWrite に実測させる（`IDWriteFontFace::GetMetrics` と `'M'` の `GetDesignGlyphMetrics`）。ウィンドウはレンダーターゲットより先に要るので、暫定サイズで作ってから実測値で `request_inner_size` し直す。
 
 #### セルの空文字列は「全角の続き」専用
 
@@ -598,7 +630,7 @@ v1 では非対応。常に入力欄の全内容が対象。
 
 - **マウス操作。** クリックもホイールも nvim へ送っていない（`nvim_input_mouse` を呼ばない）。キーボードだけで完結するツールなので必要になるまで入れない
 - **`ext_multigrid` / `ext_cmdline` / `ext_popupmenu` / `ext_messages`。** cmdline も補完メニューも浮動ウィンドウも、nvim にグリッドへ描かせる。GUI 側で作り直す価値がない
-- **フォントは単一ファミリ + 同梱 `Moralerspace Argon HW` フォールバックのみ。** `guifont` はカンマ区切りの候補列を受け付けない（先頭だけ採ると残りを黙って捨てることになるため、解けない指定は現状維持 + 警告）
+- **フォントの太字・斜体はファミリ内の合成のみ。** `guifont` の `:b` / `:i` のような装飾オプションは受け付けない（解けない指定は現状維持 + 警告）
 - **`undercurl` は点線で描く。** 波線は諦めた
 - **合字・絵文字は等幅グリッドから外れうる。** 等幅前提でセルへ割り付けているので、送り幅が違うグリフは桁がずれる
 
@@ -614,7 +646,7 @@ v1 では非対応。常に入力欄の全内容が対象。
 | トレイアイコン | `tray-icon` |
 | nvim RPC | `nvim-rs` |
 | ウィンドウ / キーボード / IME | `winit`（+ `raw-window-handle` で HWND を取り出す） |
-| 描画 / Win32 / UI Automation | `windows`（Direct2D・DirectWrite・IMM32 は winit 側） |
+| 描画 / Win32 / UI Automation | `windows`（Direct2D・DirectWrite・D3D11・DXGI・DirectComposition。IMM32 は winit 側） |
 | クリップボード | Win32 直叩き |
 | exe リソース（アイコン / バージョン情報） | `winresource`（build-dependencies） |
 

@@ -21,12 +21,24 @@ use std::collections::HashMap;
 
 use anvi_core::ui::{CursorShape, ModeInfo, Rgb, Style, UiState, Underline};
 use anyhow::{Context as _, bail};
-use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, ERROR_INSUFFICIENT_BUFFER, HWND, RECT};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_COLOR_F};
+use windows::Win32::Foundation::{
+    D2DERR_RECREATE_TARGET, ERROR_INSUFFICIENT_BUFFER, HMODULE, HWND, RECT,
+};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_PRIMITIVE_BLEND_COPY, D2D1_PRIMITIVE_BLEND_SOURCE_OVER,
+    D2D1CreateFactory, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+};
+use windows::Win32::Graphics::DirectComposition::{
+    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL,
@@ -37,6 +49,15 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory2, IDWriteTextFormat,
     IDWriteTextFormat1, IDWriteTextLayout,
 };
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
+    DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
+    IDXGISurface, IDXGISwapChain1,
+};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{HRESULT, Interface as _, PCWSTR};
 use windows_numerics::Vector2;
@@ -45,6 +66,12 @@ use crate::focus::as_hwnd;
 use crate::gui::Preedit;
 use crate::gui::font::FontSpec;
 use crate::gui::fontset::Fonts;
+
+/// 背景の不透明度。1.0 で従来どおりの不透明。
+///
+/// 透かすのは **背景だけ**。文字・カーソル・preedit は不透明のままにする
+/// （下地の見えない他アプリの上に重なるので、透かすと途端に読めなくなる）。
+const BACKGROUND_ALPHA: f32 = 0.6;
 
 /// レイアウト全体を指すテキスト範囲。
 const WHOLE: DWRITE_TEXT_RANGE = DWRITE_TEXT_RANGE {
@@ -105,11 +132,21 @@ struct Font {
     decor: Decor,
 }
 
-/// グリッドを HWND へ描くレンダラ。
+/// グリッドを描くレンダラ。
+///
+/// 出力先は HWND 直付けのレンダーターゲットではなく **DirectComposition のビジュアルに
+/// 載せたスワップチェーン**である。`ID2D1HwndRenderTarget` はアルファを無視する
+/// （`D2D1_ALPHA_MODE_IGNORE` しか取れない）ので、背景を透過させられない。
+/// 合成経路は `D3D11 デバイス → D2D デバイスコンテキスト → 合成用スワップチェーン
+/// → IDCompositionVisual → HWND`。ウィンドウ側は `WS_EX_NOREDIRECTIONBITMAP`
+/// （→ [`crate::gui::window`]）。
 ///
 /// COM オブジェクトの解放は `Drop` に任せる（`windows` の COM 型は参照カウントを持つ）。
 pub struct Renderer {
-    target: ID2D1HwndRenderTarget,
+    target: ID2D1DeviceContext,
+    swapchain: IDXGISwapChain1,
+    /// 合成ツリー。**手放すと画面から消える**ので、描画に使わなくても持ち続ける。
+    _composition: Composition,
     dwrite: IDWriteFactory2,
     /// ファミリ名の解決先（同梱フォント + システムフォント）。
     fonts: Fonts,
@@ -123,8 +160,15 @@ pub struct Renderer {
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
 }
 
+/// DirectComposition の一式。参照を保持することだけが役目。
+struct Composition {
+    _device: IDCompositionDevice,
+    _target: IDCompositionTarget,
+    _visual: IDCompositionVisual,
+}
+
 impl Renderer {
-    /// HWND に紐づいたレンダーターゲットを作る。
+    /// ウィンドウに合成されるレンダーターゲットを作る。
     ///
     /// `scale` は winit の `scale_factor`。DPI 変更やフォント変更のたびに
     /// [`Renderer::set_font`] を呼び直す前提なので、ここでは初期値として使うだけ。
@@ -133,26 +177,40 @@ impl Renderer {
         let size = client_size(hwnd)?;
 
         // SAFETY: 引数は列挙値とオプション（None）だけ。生成に失敗すれば Err が返る。
-        let factory: ID2D1Factory =
+        // `ID2D1Factory1` を要求するのは `CreateDevice` が要るため。
+        let factory: ID2D1Factory1 =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
                 .context("D2D1CreateFactory failed")?;
 
-        let props = D2D1_RENDER_TARGET_PROPERTIES::default();
-        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd,
-            pixelSize: D2D_SIZE_U {
-                width: size.0,
-                height: size.1,
-            },
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-        };
-        // SAFETY: 両方のプロパティはこのスタックフレームに生きている値への参照で、
-        // 呼び出し中だけ読まれる。hwnd は GetClientRect が通った実在ウィンドウ。
-        let target = unsafe { factory.CreateHwndRenderTarget(&props, &hwnd_props) }
-            .context("CreateHwndRenderTarget failed")?;
-        // ここで factory を手放してよい。D2D のリソースは生成元 factory を参照
-        // カウントで保持するので、ターゲットが生きている間 factory も生き続ける。
-        drop(factory);
+        let mut d3d = None;
+        // SAFETY: 出力先はローカル。BGRA_SUPPORT は D2D の相互運用に必須。
+        // アダプタ・機能レベルは既定に任せる（None / 空スライス）。
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut d3d),
+                None,
+                None,
+            )
+        }
+        .context("D3D11CreateDevice failed")?;
+        let d3d = d3d.context("D3D11CreateDevice returned no device")?;
+        let dxgi_device: IDXGIDevice = d3d.cast().context("IDXGIDevice is unavailable")?;
+
+        // SAFETY: dxgi_device は直前に作った有効な COM 参照。
+        let d2d_device = unsafe { factory.CreateDevice(&dxgi_device) }
+            .context("ID2D1Factory1::CreateDevice failed")?;
+        // SAFETY: 同上。オプションは列挙値。
+        let target = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }
+            .context("CreateDeviceContext failed")?;
+
+        let swapchain = create_swapchain(&dxgi_device, size)?;
+        bind_backbuffer(&target, &swapchain)?;
 
         // SAFETY: 生成直後のターゲットへの設定。D2D の DIP と物理ピクセルを 1:1 に
         // 固定し、倍率は自分で掛ける（モジュール冒頭の掟）。
@@ -160,6 +218,8 @@ impl Renderer {
         // SAFETY: 同上。矩形をピクセル境界へ吸着させ、セル境界に継ぎ目を出さない。
         // 文字のアンチエイリアスは別設定（既定の ClearType）なので影響しない。
         unsafe { target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED) };
+
+        let composition = compose(&dxgi_device, hwnd, &swapchain)?;
 
         // SAFETY: 引数は列挙値のみ。共有ファクトリなのでプロセス内で再利用される。
         // `IDWriteFactory2` を要求するのは `CreateFontFallbackBuilder` が要るため。
@@ -171,6 +231,8 @@ impl Renderer {
 
         Ok(Self {
             target,
+            swapchain,
+            _composition: composition,
             dwrite,
             fonts,
             format: resolved.format,
@@ -198,18 +260,31 @@ impl Renderer {
         Ok(())
     }
 
+    /// バックバッファを張り替える。
+    ///
+    /// `ResizeBuffers` はバックバッファへの参照が 1 つでも残っていると失敗するので、
+    /// **先にターゲットを外してビットマップを捨てる**。
     pub fn resize(&mut self, width_px: u32, height_px: u32) -> anyhow::Result<()> {
-        let size = D2D_SIZE_U {
-            width: width_px,
-            height: height_px,
-        };
-        // SAFETY: size はこのフレームに生きている値。ターゲットは有効な COM 参照。
-        unsafe { self.target.Resize(&size) }.context("failed to resize the Direct2D target")?;
+        // SAFETY: ターゲットを外すだけ。以降 bind_backbuffer まで描画しない。
+        unsafe { self.target.SetTarget(None) };
+        // SAFETY: バックバッファの参照は今外した。0 = 既存のバッファ数を保つ、
+        // DXGI_FORMAT_UNKNOWN = 既存の形式を保つ。
+        unsafe {
+            self.swapchain.ResizeBuffers(
+                0,
+                width_px,
+                height_px,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
+        }
+        .context("ResizeBuffers failed")?;
+        bind_backbuffer(&self.target, &self.swapchain)?;
         self.size = (width_px, height_px);
         Ok(())
     }
 
-    /// 1 フレーム描く。
+    /// 1 フレーム描いて合成へ出す。
     ///
     /// `EndDraw` が `D2DERR_RECREATE_TARGET` を返したら握り潰さず `Err` にする。
     /// デバイスが失われたときに黙って描き続けると画面が固まったまま気づけない。
@@ -224,24 +299,45 @@ impl Renderer {
 
         painted?;
         match ended {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(err) if err.code() == D2DERR_RECREATE_TARGET => {
                 bail!("the Direct2D render target was lost and must be recreated")
             }
-            Err(err) => Err(err).context("EndDraw failed"),
+            Err(err) => return Err(err).context("EndDraw failed"),
         }
+
+        // SAFETY: 描き終えたバックバッファを出す。垂直同期待ち（1）で、
+        // 押しっぱなしのキーリピートでもフレームを積み上げない。
+        unsafe { self.swapchain.Present(1, DXGI_PRESENT(0)) }
+            .ok()
+            .context("Present failed")
     }
 
     /// `BeginDraw` と `EndDraw` の間の中身。
     ///
     /// 順序に意味がある。背景 → 前景 → カーソル → preedit。preedit は
     /// 「いま入力している文字」なので必ず最前面に来る。
+    ///
+    /// **背景だけ `D2D1_PRIMITIVE_BLEND_COPY` で塗る。** 既定の source-over は
+    /// 下地にアルファを重ねるので、`Clear` で 60% にした上へ 60% のセル背景を
+    /// 乗せると 84% になってしまう。COPY なら塗った矩形の色とアルファがそのまま
+    /// 置かれ、どのセルも同じ透け方になる。文字とカーソルは source-over へ戻して
+    /// 不透明に描く（透けると読めない）。
     fn paint(&mut self, ui: &UiState, preedit: Option<&Preedit>) -> anyhow::Result<()> {
-        let clear = color_f(ui.hl.default_bg());
+        let clear = translucent(ui.hl.default_bg());
         // SAFETY: BeginDraw 済み。clear はこのフレームに生きている値。
         unsafe { self.target.Clear(Some(&clear)) };
 
-        self.paint_backgrounds(ui)?;
+        // SAFETY: 描画状態の切り替えのみ。対になる SOURCE_OVER を下で必ず戻す。
+        unsafe { self.target.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY) };
+        let backgrounds = self.paint_backgrounds(ui);
+        // SAFETY: 同上。背景の成否に関わらず戻す。
+        unsafe {
+            self.target
+                .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+        }
+        backgrounds?;
+
         self.paint_foregrounds(ui)?;
         self.paint_cursor(ui)?;
         if let Some(preedit) = preedit.filter(|p| !p.is_empty()) {
@@ -270,7 +366,7 @@ impl Renderer {
                 if bg == default_bg {
                     continue;
                 }
-                let brush = self.brush(bg)?;
+                let brush = self.bg_brush(bg)?;
                 let cell = self.cell;
                 self.fill(
                     rect_of(
@@ -670,19 +766,36 @@ impl Renderer {
         Ok(layout)
     }
 
+    /// 不透明な色のブラシ。文字・カーソル・装飾はすべてこちら。
+    fn brush(&mut self, color: Rgb) -> anyhow::Result<ID2D1SolidColorBrush> {
+        self.brush_of(color_f(color))
+    }
+
+    /// 背景用の半透明ブラシ（→ [`BACKGROUND_ALPHA`]）。
+    fn bg_brush(&mut self, color: Rgb) -> anyhow::Result<ID2D1SolidColorBrush> {
+        self.brush_of(translucent(color))
+    }
+
     /// 色のブラシ。無ければ作って覚える。
     ///
     /// 返すのはクローン（COM の `AddRef` 1 回）。`CreateSolidColorBrush` の再生成に
     /// 比べれば桁違いに安く、呼び出し側が複数のブラシを同時に持てるようになる。
-    fn brush(&mut self, color: Rgb) -> anyhow::Result<ID2D1SolidColorBrush> {
-        if let Some(brush) = self.brushes.get(&color.0) {
+    /// 鍵はアルファ込みの色（`0xAARRGGBB`）。同じ RGB でも不透明版と半透明版は
+    /// 別のブラシとして持つ。
+    fn brush_of(&mut self, value: D2D1_COLOR_F) -> anyhow::Result<ID2D1SolidColorBrush> {
+        let key = u32::from_le_bytes([
+            channel_byte(value.b),
+            channel_byte(value.g),
+            channel_byte(value.r),
+            channel_byte(value.a),
+        ]);
+        if let Some(brush) = self.brushes.get(&key) {
             return Ok(brush.clone());
         }
-        let value = color_f(color);
         // SAFETY: value はこのフレームに生きている値。ブラシはターゲットが所有する。
         let brush = unsafe { self.target.CreateSolidColorBrush(&value, None) }
             .context("CreateSolidColorBrush failed")?;
-        self.brushes.insert(color.0, brush.clone());
+        self.brushes.insert(key, brush.clone());
         Ok(brush)
     }
 
@@ -711,8 +824,17 @@ fn resolve_font(
         bail!("invalid font size {}pt at scale {scale}", font.size_pt);
     }
 
-    let (cell, decor) = measure(fonts, &font.family, px_size, scale)?;
-    let format = make_format(dwrite, fonts, font, px_size, cell)?;
+    // 候補列のうち実在する最初のものがプライマリ。どれも無ければ落とす。
+    let primary = font
+        .primary(|family| fonts.find(family).is_some())
+        .with_context(|| {
+            format!(
+                "none of the font families {:?} are available",
+                font.families
+            )
+        })?;
+    let (cell, decor) = measure(fonts, primary, px_size, scale)?;
+    let format = make_format(dwrite, fonts, primary, font, px_size, cell)?;
     Ok(Font {
         format,
         cell,
@@ -815,14 +937,15 @@ fn measure(
 fn make_format(
     dwrite: &IDWriteFactory2,
     fonts: &Fonts,
+    primary: &str,
     font: &FontSpec,
     px_size: f32,
     cell: CellMetrics,
 ) -> anyhow::Result<IDWriteTextFormat> {
     let (collection, _) = fonts
-        .find(&font.family)
-        .with_context(|| format!("font family {:?} is not available", font.family))?;
-    let family = wide_nul(&font.family);
+        .find(primary)
+        .with_context(|| format!("font family {primary:?} is not available"))?;
+    let family = wide_nul(primary);
     // ロケールは空文字列＝システム既定。日本語環境では ja-JP が使われ、
     // 漢字の字形が中国語圏の異体字にならない。ここで決め打ちにはしない。
     let locale = wide_nul("");
@@ -888,7 +1011,7 @@ fn install_fallback(
         .filter(|name| !name.is_empty())
         .collect();
     if names.is_empty() {
-        bail!("the font fallback chain for {:?} is empty", font.family);
+        bail!("the font fallback chain for {:?} is empty", font.families);
     }
     let ranges = [DWRITE_UNICODE_RANGE {
         first: 0,
@@ -1039,6 +1162,118 @@ fn color_f(color: Rgb) -> D2D1_COLOR_F {
         b: f32::from(b) / 255.0,
         a: 1.0,
     }
+}
+
+/// 背景色を [`BACKGROUND_ALPHA`] の透け方にする。
+///
+/// スワップチェーンは乗算済みアルファなので、色成分にもアルファを掛けておく。
+/// 掛け忘れると合成時に色が浮く（明るい背景ほど目立つ）。
+fn translucent(color: Rgb) -> D2D1_COLOR_F {
+    let opaque = color_f(color);
+    D2D1_COLOR_F {
+        r: opaque.r * BACKGROUND_ALPHA,
+        g: opaque.g * BACKGROUND_ALPHA,
+        b: opaque.b * BACKGROUND_ALPHA,
+        a: BACKGROUND_ALPHA,
+    }
+}
+
+/// `D2D1_COLOR_F` の 1 成分をブラシ鍵用のバイトへ。
+fn channel_byte(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// 合成用のスワップチェーン。
+///
+/// `CreateSwapChainForComposition` は HWND を取らない（出力先はビジュアル）。
+/// アルファは乗算済み、効果は FLIP 系しか許されない。サイズ 0 は弾かれるので、
+/// まだ実サイズの無いウィンドウでは 1x1 で作って最初の `Resized` で張り替える。
+fn create_swapchain(
+    dxgi_device: &IDXGIDevice,
+    size: (u32, u32),
+) -> anyhow::Result<IDXGISwapChain1> {
+    // SAFETY: デバイスからアダプタ、アダプタから生成元ファクトリを辿るだけ。
+    let factory: IDXGIFactory2 = unsafe {
+        dxgi_device
+            .GetAdapter()
+            .context("IDXGIDevice::GetAdapter failed")?
+            .GetParent()
+            .context("IDXGIFactory2 is unavailable")?
+    };
+
+    let desc = DXGI_SWAP_CHAIN_DESC1 {
+        Width: size.0.max(1),
+        Height: size.1.max(1),
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: 2,
+        Scaling: DXGI_SCALING_STRETCH,
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+        ..Default::default()
+    };
+    // SAFETY: desc はこのスタックフレームの値で、呼び出し中だけ読まれる。
+    unsafe { factory.CreateSwapChainForComposition(dxgi_device, &desc, None) }
+        .context("CreateSwapChainForComposition failed")
+}
+
+/// バックバッファを D2D のターゲットに据える。
+fn bind_backbuffer(target: &ID2D1DeviceContext, swapchain: &IDXGISwapChain1) -> anyhow::Result<()> {
+    // SAFETY: 0 番はこのスワップチェーンが必ず持つバックバッファ。
+    let surface: IDXGISurface = unsafe { swapchain.GetBuffer(0) }.context("GetBuffer(0) failed")?;
+    let props = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        ..Default::default()
+    };
+    // SAFETY: surface と props はこの呼び出し中だけ読まれる有効な値。
+    let bitmap = unsafe { target.CreateBitmapFromDxgiSurface(&surface, Some(&props)) }
+        .context("CreateBitmapFromDxgiSurface failed")?;
+    // SAFETY: 直前に作ったビットマップ。ターゲットが参照カウントで保持する。
+    unsafe { target.SetTarget(&bitmap) };
+    Ok(())
+}
+
+/// スワップチェーンをウィンドウへ合成する。
+///
+/// 返り値を捨ててはいけない。`IDCompositionTarget` を手放すと合成が解除され、
+/// `WS_EX_NOREDIRECTIONBITMAP` のウィンドウには何も残らない（真っ黒でも
+/// 透明でもなく、単に描いたものが出ない）。
+fn compose(
+    dxgi_device: &IDXGIDevice,
+    hwnd: HWND,
+    swapchain: &IDXGISwapChain1,
+) -> anyhow::Result<Composition> {
+    // SAFETY: 出力は Option へ受ける。デバイスは有効な COM 参照。
+    let device: IDCompositionDevice = unsafe { DCompositionCreateDevice(dxgi_device) }
+        .context("DCompositionCreateDevice failed")?;
+    // SAFETY: hwnd は実在ウィンドウ。topmost = true でウィンドウ全体を覆う。
+    let target =
+        unsafe { device.CreateTargetForHwnd(hwnd, true) }.context("CreateTargetForHwnd failed")?;
+    // SAFETY: 直前に作ったデバイスから作る。
+    let visual = unsafe { device.CreateVisual() }.context("CreateVisual failed")?;
+    // SAFETY: スワップチェーンは有効な COM 参照。
+    unsafe { visual.SetContent(swapchain) }.context("IDCompositionVisual::SetContent failed")?;
+    // SAFETY: 同上。
+    unsafe { target.SetRoot(&visual) }.context("IDCompositionTarget::SetRoot failed")?;
+    // SAFETY: 構築したツリーを一度だけ確定させる。以降はスワップチェーンの
+    // Present だけで画面が更新される。
+    unsafe { device.Commit() }.context("IDCompositionDevice::Commit failed")?;
+
+    Ok(Composition {
+        _device: device,
+        _target: target,
+        _visual: visual,
+    })
 }
 
 /// クライアント領域の物理ピクセルサイズ。

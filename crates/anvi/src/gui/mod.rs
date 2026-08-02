@@ -27,7 +27,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{Window, WindowId};
 
 use crate::controller::Cmd;
-use crate::gui::font::FontSpec;
+use crate::gui::font::{FontSpec, GuiFont};
 use crate::gui::ime::ImeState;
 use crate::gui::render::Renderer;
 use crate::hotkey::Hotkeys;
@@ -303,21 +303,19 @@ impl App {
 
     /// `option_set guifont` の反映。
     ///
-    /// **解けない指定を既定へ黙って戻さない。** 一方、空の `guifont`（起動直後の
-    /// 既定値であり、`:set guifont=` で明示的に戻したときの値でもある）は「GUI に
-    /// 任せる」という指定なので、こちらの既定フォントを使う。
+    /// **解けない指定を既定へ黙って戻さない。** 一方「GUI に任せる」指定
+    /// （空文字列、およびサイズを含まない候補列 = nvim の組み込み既定値）は
+    /// こちらの既定フォントを使う。→ [`FontSpec::parse`]
     fn apply_guifont(&mut self) {
-        let font = match self.ui.guifont.as_deref() {
-            None => FontSpec::default(),
-            Some(spec) => {
-                let Some(font) = FontSpec::parse(spec) else {
-                    tracing::warn!(
-                        guifont = spec,
-                        "unparsable guifont; keeping the current font"
-                    );
-                    return;
-                };
-                font
+        let font = match self.ui.guifont.as_deref().map(FontSpec::parse) {
+            None | Some(GuiFont::Unspecified) => FontSpec::default(),
+            Some(GuiFont::Spec(font)) => font,
+            Some(GuiFont::Invalid) => {
+                tracing::warn!(
+                    guifont = self.ui.guifont.as_deref(),
+                    "unparsable guifont; keeping the current font"
+                );
+                return;
             }
         };
         if font == self.font {
@@ -332,14 +330,14 @@ impl App {
             };
             let scale = surface.window.scale_factor();
             if let Err(err) = surface.renderer.set_font(&font, scale) {
-                tracing::error!(%err, family = font.family, "cannot switch the font");
+                tracing::error!(%err, families = ?font.families, "cannot switch the font");
                 return;
             }
             let metrics = surface.renderer.metrics();
             surface.window.request_redraw();
             window::grid_for(surface.window.inner_size(), (metrics.width, metrics.height))
         };
-        tracing::info!(family = font.family, size_pt = font.size_pt, "font changed");
+        tracing::info!(families = ?font.families, size_pt = font.size_pt, "font changed");
         self.font = font;
         self.set_grid(grid);
     }
