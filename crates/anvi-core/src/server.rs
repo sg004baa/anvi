@@ -453,8 +453,23 @@ fn parse_notification(name: &str, args: &[Value]) -> Result<Option<HostEvent>, S
                 ));
             };
             Ok(Some(HostEvent::InitError {
-                kind: init_error_field(fields, "kind")?,
-                message: init_error_field(fields, "message")?,
+                kind: string_field(fields, "init_error", "kind")?,
+                message: string_field(fields, "init_error", "message")?,
+            }))
+        }
+        "config_resolved" => {
+            let [Value::Map(fields)] = args else {
+                return Err(format!(
+                    "config_resolved expects one map with dir/loaded, got {args:?}"
+                ));
+            };
+            let loaded = field(fields, "config_resolved", "loaded")?;
+            let loaded = loaded
+                .as_bool()
+                .ok_or_else(|| format!("config_resolved `loaded` is not a bool: {loaded:?}"))?;
+            Ok(Some(HostEvent::ConfigResolved {
+                dir: string_field(fields, "config_resolved", "dir")?,
+                loaded,
             }))
         }
         _ => Ok(None),
@@ -475,16 +490,20 @@ fn warn_unexpected_payload(name: &str, args: &[Value]) {
     }
 }
 
-fn init_error_field(fields: &[(Value, Value)], key: &str) -> Result<String, String> {
-    let value = fields
+fn field<'a>(fields: &'a [(Value, Value)], event: &str, key: &str) -> Result<&'a Value, String> {
+    fields
         .iter()
         .find(|(k, _)| k.as_str() == Some(key))
         .map(|(_, v)| v)
-        .ok_or_else(|| format!("init_error payload has no `{key}` field: {fields:?}"))?;
+        .ok_or_else(|| format!("{event} payload has no `{key}` field: {fields:?}"))
+}
+
+fn string_field(fields: &[(Value, Value)], event: &str, key: &str) -> Result<String, String> {
+    let value = field(fields, event, key)?;
     value
         .as_str()
         .map(str::to_owned)
-        .ok_or_else(|| format!("init_error `{key}` is not a string: {value:?}"))
+        .ok_or_else(|| format!("{event} `{key}` is not a string: {value:?}"))
 }
 
 #[cfg(test)]
@@ -589,6 +608,32 @@ mod tests {
         ])];
         assert!(parse_notification("init_error", &wrong_type).is_err());
         assert!(parse_notification("init_error", &[Value::Nil]).is_err());
+    }
+
+    #[test]
+    fn config_resolved_carries_the_dir_and_whether_it_loaded() {
+        let args = vec![Value::Map(vec![
+            (s("dir"), s(r"C:\Users\me\.config\anvi")),
+            (s("loaded"), Value::from(false)),
+        ])];
+        assert_eq!(
+            parse_notification("config_resolved", &args),
+            Ok(Some(HostEvent::ConfigResolved {
+                dir: r"C:\Users\me\.config\anvi".to_string(),
+                loaded: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn config_resolved_without_the_contract_fields_is_malformed() {
+        let missing = vec![Value::Map(vec![(s("dir"), s("x"))])];
+        assert!(parse_notification("config_resolved", &missing).is_err());
+        let wrong_type = vec![Value::Map(vec![
+            (s("dir"), s("x")),
+            (s("loaded"), s("true")),
+        ])];
+        assert!(parse_notification("config_resolved", &wrong_type).is_err());
     }
 
     #[test]

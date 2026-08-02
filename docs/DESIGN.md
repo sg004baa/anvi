@@ -277,6 +277,16 @@ vim.fn.stdpath("data")    -- → $XDG_DATA_HOME/anvi-data
 
 > `XDG_CONFIG_HOME` 未設定時、Windows の Neovim はこれを `%LOCALAPPDATA%` として扱う（`AppData\Roaming` ではない）。したがって既定では `%LOCALAPPDATA%\anvi\init.lua`。
 
+**解決先は必ず host へ報告する（`config_resolved`）。** 探索パスが 1 つしかなくても、
+その 1 つがどこかは環境変数次第で動く。「設定が効かない」の原因が
+`XDG_CONFIG_HOME` の有無だったとき、ログに出ていなければ利用者は当てずっぽうで
+`AppData\Roaming` にファイルを置くことになる（実際に起きた）。読み込みの成否
+（`loaded`）も一緒に運び、host は起動時に 1 行出す:
+
+```
+INFO anvi::controller: local config dir="C:\Users\you\.config\anvi" loaded=false
+```
+
 #### 読み込み順
 
 ```
@@ -394,6 +404,16 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
 winit で作る。`visible=false` / `active=false` / `skip_taskbar=true` で、**作った時点では画面に出ないしフォーカスも奪わない**。v1 の「画面外へ飛ばしてから隠す」待避は不要になった。
 
 winit の HWND（`raw-window-handle` 経由）に Direct2D の `ID2D1HwndRenderTarget` を載せる。セル寸法は DirectWrite に実測させる（`IDWriteFontFace::GetMetrics` と `'M'` の `GetDesignGlyphMetrics`）。ウィンドウはレンダーターゲットより先に要るので、暫定サイズで作ってから実測値で `request_inner_size` し直す。
+
+#### セルの空文字列は「全角の続き」専用
+
+`grid_line` は全角文字を「本体セル + 空文字列セル」で送る。描画側はこの空文字列を
+目印に、カーソルが続きセルへ乗ったとき本体セルへ寄せる。
+
+したがって **未描画・消去済みのセルを空文字列にしてはならない**（`Cell::BLANK` =
+空白 1 文字）。nvim は `grid_clear` / `grid_resize` のあと空白セルを送り直さないので、
+既定値が空文字列だと行末の未描画セルが「全角の続き」に化け、**入力中のカーソルが
+1 セル左へずれる**（v0.2.0 で実際に出た）。
 
 ### 7.2 表示 / 非表示
 
@@ -772,11 +792,15 @@ local aw = require("anvi")
 -- 1. 同梱コア。契約を確立する
 aw.setup()
 
--- 2. ローカル設定（任意）。壊れていても起動を止めない
+-- 2. ローカル設定（任意）。壊れていても起動を止めない。
+--    場所を決めるのは nvim であってこのアプリではない
 local cfg_dir  = vim.fn.stdpath("config")            -- = $XDG_CONFIG_HOME/anvi
 local cfg_file = vim.fs.joinpath(cfg_dir, "init.lua")
+local found    = vim.uv.fs_stat(cfg_file) ~= nil
 
-if vim.uv.fs_stat(cfg_file) then
+aw.report_config(cfg_dir, found)                     -- 効かないときの一次情報
+
+if found then
   vim.opt.runtimepath:append(cfg_dir)                -- ローカル側は append
   local ok, err = pcall(dofile, cfg_file)
   if not ok then
@@ -808,19 +832,26 @@ local function notify(event, payload)
   end
 end
 
---- 起動時のエラー報告。この時点ではまだ host が接続していないので溜めておく
-M.pending_errors = {}
+--- 起動時の報告。この時点ではまだ host が接続していないので溜めておく。
+--- `{ event, payload }` の並びで、届いた順にそのまま流す
+M.pending = {}
+
 function M.report_error(kind, msg)
-  table.insert(M.pending_errors, { kind = kind, message = msg })
+  table.insert(M.pending, { event = "init_error", payload = { kind = kind, message = msg } })
+end
+
+--- ローカル設定をどこに探しに行ったか
+function M.report_config(dir, loaded)
+  table.insert(M.pending, { event = "config_resolved", payload = { dir = dir, loaded = loaded } })
 end
 
 --- host が接続時に呼ぶ
 function M.set_host(chan)
   M.host = chan
-  for _, e in ipairs(M.pending_errors) do
-    notify("init_error", e)   -- host 側でログに出す
+  for _, e in ipairs(M.pending) do
+    notify(e.event, e.payload)  -- host 側でログに出す
   end
-  M.pending_errors = {}
+  M.pending = {}
 end
 
 --- host がセッション開始時に呼ぶ
@@ -950,6 +981,10 @@ match event.as_str() {
             }
         }
         state.phase = Phase::Idle;
+    }
+    "config_resolved" => {
+        // どこを見に行ったか。「設定が効かない」の一次情報（→ 5.4）
+        log::info!("local config dir={:?} loaded={:?}", args.dir, args.loaded);
     }
     "init_error" => {
         // ローカル設定の読み込み失敗。起動は続行済み。ログに残すだけ（→ 5.4）

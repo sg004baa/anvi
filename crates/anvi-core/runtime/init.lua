@@ -10,11 +10,17 @@ local aw = require("anvi")
 -- 1. 同梱コア。契約を確立する
 aw.setup()
 
--- 2. ローカル設定（任意）。壊れていても起動を止めない
-local cfg_dir = vim.fn.stdpath("config") -- = $XDG_CONFIG_HOME/anvi
+-- 2. ローカル設定（任意）。壊れていても起動を止めない。
+--    場所を決めるのは nvim であってこのアプリではない。`NVIM_APPNAME=anvi` なので
+--    `$XDG_CONFIG_HOME/anvi`、XDG_CONFIG_HOME が無ければ `%LOCALAPPDATA%\anvi`。
+--    「効かない」を勘で探させないため、解決先は必ず host のログへ流す
+local cfg_dir = vim.fn.stdpath("config")
 local cfg_file = vim.fs.joinpath(cfg_dir, "init.lua")
+local found = vim.uv.fs_stat(cfg_file) ~= nil
 
-if vim.uv.fs_stat(cfg_file) then
+aw.report_config(cfg_dir, found)
+
+if found then
   vim.opt.runtimepath:append(cfg_dir) -- ローカル側は append
   local ok, err = pcall(dofile, cfg_file)
   if not ok then
