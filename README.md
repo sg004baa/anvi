@@ -88,9 +88,16 @@ vim.keymap.set("n", "<C-s>", "<Cmd>write<CR>")
 
 ### 見た目
 
-タイトルバーは無い（`ZZ` / `ZQ` で閉じる）。背景は不透明度 60% の透過で、
-文字とカーソルは不透明のまま描く。どちらも固定値で、
-`crates/anvi/src/gui/window.rs` と `render.rs` の `BACKGROUND_ALPHA` にある。
+タイトルバーは無い（`ZZ` / `ZQ` で閉じる）。背景は不透明度 75% の透過で、
+文字とカーソルは不透明のまま描く。周囲に細い枠線と余白がある。
+
+いずれも `crates/anvi/src/gui/render.rs` の先頭の定数を書き換えてビルドする。
+
+| 定数 | 既定 |
+|---|---|
+| `BACKGROUND_ALPHA` | `0.75`（背景の不透明度） |
+| `PADDING` | `8.0`（周囲の余白、論理ピクセル） |
+| `BORDER_WIDTH` / `BORDER_ALPHA` | `1.0` / `0.45`（枠線。色は配色の前景色） |
 
 ### ホットキー
 

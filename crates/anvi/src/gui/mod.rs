@@ -260,7 +260,12 @@ impl App {
             .context("failed to create the Direct2D renderer")?;
         // 暫定サイズで作ったウィンドウを、実測したセル寸法へ合わせ直す。
         let metrics = renderer.metrics();
-        window::resize_to_grid(&window, (metrics.width, metrics.height), self.grid);
+        window::resize_to_grid(
+            &window,
+            (metrics.width, metrics.height),
+            self.grid,
+            renderer.padding(),
+        );
         window.set_ime_allowed(self.ui.mode.accepts_text_input());
         Ok(Surface {
             window,
@@ -334,8 +339,13 @@ impl App {
                 return;
             }
             let metrics = surface.renderer.metrics();
+            let pad = surface.renderer.padding();
             surface.window.request_redraw();
-            window::grid_for(surface.window.inner_size(), (metrics.width, metrics.height))
+            window::grid_for(
+                surface.window.inner_size(),
+                (metrics.width, metrics.height),
+                pad,
+            )
         };
         tracing::info!(families = ?font.families, size_pt = font.size_pt, "font changed");
         self.font = font;
@@ -403,6 +413,7 @@ impl App {
         Ok(Some(window::grid_for(
             size,
             (metrics.width, metrics.height),
+            surface.renderer.padding(),
         )))
     }
 
@@ -417,8 +428,13 @@ impl App {
                 .set_font(&self.font, scale)
                 .context("cannot rebuild the font for the new dpi")?;
             let metrics = surface.renderer.metrics();
+            let pad = surface.renderer.padding();
             surface.window.request_redraw();
-            window::grid_for(surface.window.inner_size(), (metrics.width, metrics.height))
+            window::grid_for(
+                surface.window.inner_size(),
+                (metrics.width, metrics.height),
+                pad,
+            )
         };
         self.set_grid(grid);
         Ok(())
@@ -464,8 +480,13 @@ impl App {
             surface.renderer = Renderer::new(surface.hwnd, &self.font, scale)
                 .context("cannot recreate the render target")?;
             let metrics = surface.renderer.metrics();
+            let pad = surface.renderer.padding();
             surface.window.request_redraw();
-            window::grid_for(surface.window.inner_size(), (metrics.width, metrics.height))
+            window::grid_for(
+                surface.window.inner_size(),
+                (metrics.width, metrics.height),
+                pad,
+            )
         };
         self.set_grid(grid);
         Ok(())
@@ -504,8 +525,10 @@ impl App {
         let metrics = surface.renderer.metrics();
         let width = f64::from(metrics.width);
         let height = f64::from(metrics.height);
-        let x = self.ui.cursor.col as f64 * width;
-        let y = self.ui.cursor.row as f64 * height;
+        // グリッドは余白のぶんずらして描いている。候補ウィンドウも同じだけずらす。
+        let pad = f64::from(surface.renderer.padding());
+        let x = self.ui.cursor.col as f64 * width + pad;
+        let y = self.ui.cursor.row as f64 * height + pad;
         surface.window.set_ime_cursor_area(
             PhysicalPosition::new(x, y),
             PhysicalSize::new(width, height),

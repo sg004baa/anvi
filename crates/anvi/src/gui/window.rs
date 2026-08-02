@@ -75,11 +75,13 @@ pub fn hwnd_of(window: &Window) -> anyhow::Result<isize> {
 
 /// グリッドがちょうど収まる内側サイズへ合わせる。
 ///
-/// `cell` は物理ピクセルのセル寸法（幅・高さ）。要求したサイズがそのまま通るとは
+/// `cell` は物理ピクセルのセル寸法（幅・高さ）、`pad` はグリッドの周囲に空ける
+/// 余白（物理ピクセル。上下左右それぞれ）。要求したサイズがそのまま通るとは
 /// 限らない（DWM の最小サイズなど）ので、確定は後続の `Resized` イベントで行う。
-pub fn resize_to_grid(window: &Window, cell: (f32, f32), grid: (u16, u16)) {
-    let width = to_px(f64::from(grid.0) * f64::from(cell.0));
-    let height = to_px(f64::from(grid.1) * f64::from(cell.1));
+pub fn resize_to_grid(window: &Window, cell: (f32, f32), grid: (u16, u16), pad: f32) {
+    let margin = f64::from(pad) * 2.0;
+    let width = to_px(f64::from(grid.0) * f64::from(cell.0) + margin);
+    let height = to_px(f64::from(grid.1) * f64::from(cell.1) + margin);
     let size = PhysicalSize::new(width, height);
     if window.request_inner_size(size).is_none() {
         tracing::debug!(
@@ -90,12 +92,16 @@ pub fn resize_to_grid(window: &Window, cell: (f32, f32), grid: (u16, u16)) {
     }
 }
 
-/// 内側サイズに収まるグリッドの行列数。端数は切り捨て、最低 1x1。
+/// 内側サイズの、余白を除いた部分に収まるグリッドの行列数。端数は切り捨て、最低 1x1。
 ///
 /// 0 行 0 列を nvim へ送ると `nvim_ui_try_resize` がエラーを返すので、ここで潰す。
 #[must_use]
-pub fn grid_for(size: PhysicalSize<u32>, cell: (f32, f32)) -> (u16, u16) {
-    (count(size.width, cell.0), count(size.height, cell.1))
+pub fn grid_for(size: PhysicalSize<u32>, cell: (f32, f32), pad: f32) -> (u16, u16) {
+    let margin = (pad * 2.0).ceil().max(0.0) as u32;
+    (
+        count(size.width.saturating_sub(margin), cell.0),
+        count(size.height.saturating_sub(margin), cell.1),
+    )
 }
 
 /// 画面に出して前面へ持ってくる（DESIGN 6.2 手順 5）。

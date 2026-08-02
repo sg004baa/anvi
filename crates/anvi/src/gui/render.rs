@@ -60,7 +60,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{HRESULT, Interface as _, PCWSTR};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::focus::as_hwnd;
 use crate::gui::Preedit;
@@ -71,7 +71,19 @@ use crate::gui::fontset::Fonts;
 ///
 /// 透かすのは **背景だけ**。文字・カーソル・preedit は不透明のままにする
 /// （下地の見えない他アプリの上に重なるので、透かすと途端に読めなくなる）。
-const BACKGROUND_ALPHA: f32 = 0.6;
+const BACKGROUND_ALPHA: f32 = 0.75;
+
+/// グリッドの周囲に空ける余白（論理ピクセル、片側）。物理ピクセルへは DPI 倍率を掛ける。
+///
+/// 文字が枠線に貼り付かないだけの幅。行や桁を増やすものではないので、
+/// この分だけウィンドウを広げる（→ [`crate::gui::window::resize_to_grid`]）。
+const PADDING: f32 = 8.0;
+
+/// 枠線の太さ（論理ピクセル）と不透明度。
+///
+/// 色は既定の前景色。背景が透けている以上、縁が無いと下のアプリと地続きに見える。
+const BORDER_WIDTH: f32 = 1.0;
+const BORDER_ALPHA: f32 = 0.45;
 
 /// レイアウト全体を指すテキスト範囲。
 const WHOLE: DWRITE_TEXT_RANGE = DWRITE_TEXT_RANGE {
@@ -153,6 +165,8 @@ pub struct Renderer {
     format: IDWriteTextFormat,
     cell: CellMetrics,
     decor: Decor,
+    /// winit の `scale_factor`。余白と枠線を DPI に追従させるために持つ。
+    scale: f32,
     /// レンダーターゲットの物理ピクセルサイズ。preedit の右端打ち切りに使う。
     size: (u32, u32),
     /// 色ごとのブラシ。`CreateSolidColorBrush` を毎フレーム回すと D2D 内部で
@@ -238,6 +252,7 @@ impl Renderer {
             format: resolved.format,
             cell: resolved.cell,
             decor: resolved.decor,
+            scale: scale as f32,
             size,
             brushes: HashMap::new(),
         })
@@ -246,6 +261,15 @@ impl Renderer {
     #[must_use]
     pub fn metrics(&self) -> CellMetrics {
         self.cell
+    }
+
+    /// グリッドの周囲に空ける余白（物理ピクセル、片側）。
+    ///
+    /// 論理ピクセルで決め打ちし、DPI に合わせて丸める。呼び出し側はこの分を
+    /// 差し引いてグリッドの行列数を決める（→ [`crate::gui::window::grid_for`]）。
+    #[must_use]
+    pub fn padding(&self) -> f32 {
+        (PADDING * self.scale).round()
     }
 
     /// フォントを差し替える。`guifont` の変更と DPI 変更の両方がここへ来る。
@@ -257,6 +281,7 @@ impl Renderer {
         self.format = resolved.format;
         self.cell = resolved.cell;
         self.decor = resolved.decor;
+        self.scale = scale as f32;
         Ok(())
     }
 
@@ -315,19 +340,38 @@ impl Renderer {
 
     /// `BeginDraw` と `EndDraw` の間の中身。
     ///
-    /// 順序に意味がある。背景 → 前景 → カーソル → preedit。preedit は
-    /// 「いま入力している文字」なので必ず最前面に来る。
+    /// 順序に意味がある。背景 → 前景 → カーソル → preedit → 枠線。preedit は
+    /// 「いま入力している文字」なので他のどれよりも前に、枠線はウィンドウの
+    /// 縁を定義するものなので最前面に来る。
     ///
     /// **背景だけ `D2D1_PRIMITIVE_BLEND_COPY` で塗る。** 既定の source-over は
-    /// 下地にアルファを重ねるので、`Clear` で 60% にした上へ 60% のセル背景を
-    /// 乗せると 84% になってしまう。COPY なら塗った矩形の色とアルファがそのまま
+    /// 下地にアルファを重ねるので、`Clear` で 75% にした上へ 75% のセル背景を
+    /// 乗せると 94% になってしまう。COPY なら塗った矩形の色とアルファがそのまま
     /// 置かれ、どのセルも同じ透け方になる。文字とカーソルは source-over へ戻して
     /// 不透明に描く（透けると読めない）。
+    ///
+    /// グリッドは余白のぶんだけ平行移動して描く。セル座標の計算に余白を混ぜると
+    /// 全ての描画関数が余白を知る羽目になるので、変換行列 1 枚で片付ける。
     fn paint(&mut self, ui: &UiState, preedit: Option<&Preedit>) -> anyhow::Result<()> {
         let clear = translucent(ui.hl.default_bg());
         // SAFETY: BeginDraw 済み。clear はこのフレームに生きている値。
+        // `Clear` は変換行列の影響を受けないので、余白も同じ色で埋まる。
         unsafe { self.target.Clear(Some(&clear)) };
 
+        let pad = self.padding();
+        // SAFETY: 以降のセル座標を余白のぶん右下へずらす。対になる恒等変換を
+        // 枠線の前で必ず戻す。
+        unsafe { self.target.SetTransform(&Matrix3x2::translation(pad, pad)) };
+        let grid = self.paint_grid(ui, preedit);
+        // SAFETY: 同上。グリッドの成否に関わらず戻す。
+        unsafe { self.target.SetTransform(&Matrix3x2::identity()) };
+        grid?;
+
+        self.paint_border(ui)
+    }
+
+    /// 余白の内側。呼び出し元が変換行列を掛けている前提。
+    fn paint_grid(&mut self, ui: &UiState, preedit: Option<&Preedit>) -> anyhow::Result<()> {
         // SAFETY: 描画状態の切り替えのみ。対になる SOURCE_OVER を下で必ず戻す。
         unsafe { self.target.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY) };
         let backgrounds = self.paint_backgrounds(ui);
@@ -343,6 +387,28 @@ impl Renderer {
         if let Some(preedit) = preedit.filter(|p| !p.is_empty()) {
             self.paint_preedit(ui, preedit)?;
         }
+        Ok(())
+    }
+
+    /// ウィンドウの縁。
+    ///
+    /// 枠が無いと、透けた背景がそのまま下のアプリと混ざって境界を見失う。
+    /// 色は既定の前景色なので、配色を変えれば枠も追従する。
+    fn paint_border(&mut self, ui: &UiState) -> anyhow::Result<()> {
+        let width = (BORDER_WIDTH * self.scale).round().max(1.0);
+        // 線は中心線から両側へ太る。半分内側へ寄せないと外側の半分が画面外へ落ちる。
+        let inset = width / 2.0;
+        let rect = rect_of(
+            inset,
+            inset,
+            (self.size.0 as f32 - inset).max(inset),
+            (self.size.1 as f32 - inset).max(inset),
+        );
+        let mut color = color_f(ui.hl.default_fg());
+        color.a = BORDER_ALPHA;
+        let brush = self.brush_of(color)?;
+        // SAFETY: BeginDraw と EndDraw の間。rect と brush はこの呼び出し中生きている。
+        unsafe { self.target.DrawRectangle(&rect, &brush, width, None) };
         Ok(())
     }
 
@@ -660,8 +726,10 @@ impl Renderer {
         let x = col as f32 * metrics.width;
         let y = row as f32 * metrics.height;
 
-        // 右端はグリッドの終わりかウィンドウの終わり、狭いほう。
-        let right = (cols as f32 * metrics.width).min(self.size.0 as f32);
+        // 右端はグリッドの終わりか余白の内側の終わり、狭いほう。座標は余白のぶん
+        // 平行移動された空間にいるので、ウィンドウ幅から左右の余白を引く。
+        let inner_width = (self.size.0 as f32 - self.padding() * 2.0).max(0.0);
+        let right = (cols as f32 * metrics.width).min(inner_width);
         let available = right - x;
         if available <= 0.0 {
             return Ok(());
