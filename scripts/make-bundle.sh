@@ -20,11 +20,11 @@ dest=${2:-$repo/target/x86_64-pc-windows-msvc/release}
 
 [[ -f $nvim_src/bin/nvim.exe ]] || { echo "not an unpacked nvim-win64 dir: $nvim_src" >&2; exit 1; }
 [[ -d $nvim_src/share/nvim/runtime ]] || { echo "nvim runtime missing: $nvim_src/share/nvim/runtime" >&2; exit 1; }
-[[ -f $dest/anywhere-nvim.exe ]] || { echo "build anywhere-nvim.exe first: $dest" >&2; exit 1; }
+[[ -f $dest/anvi.exe ]] || { echo "build anvi.exe first: $dest" >&2; exit 1; }
 
 rm -rf "$dest/runtime" "$dest/nvim"
 mkdir -p "$dest/nvim"
-cp -r "$repo/crates/anywhere-core/runtime" "$dest/runtime"
+cp -r "$repo/crates/anvi-core/runtime" "$dest/runtime"
 cp -r "$nvim_src/bin" "$nvim_src/share" "$dest/nvim/"
 [[ -d $nvim_src/lib ]] && cp -r "$nvim_src/lib" "$dest/nvim/"
 
@@ -33,9 +33,10 @@ cp -r "$nvim_src/bin" "$nvim_src/share" "$dest/nvim/"
 # nvim/LICENSE.txt として落としてくる（release.yml）。
 cp "$repo/LICENSE-MIT" "$repo/LICENSE-APACHE" "$dest/"
 cp "$repo/assets/fonts/LICENSE-Moralerspace.txt" "$dest/"
+cp "$repo/README.md" "$dest/"
 
 # 空ファイルを置いていないことをここで確認する。host も起動時に同じ検査をする。
-for f in "$dest/runtime/init.lua" "$dest/runtime/lua/anywhere/init.lua"; do
+for f in "$dest/runtime/init.lua" "$dest/runtime/lua/anvi/init.lua"; do
   [[ -s $f ]] || { echo "empty after copy: $f" >&2; exit 1; }
 done
 

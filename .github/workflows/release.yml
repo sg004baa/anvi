@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           crate="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "anywhere-nvim") | .version')"
+            | jq -r '.packages[] | select(.name == "anvi") | .version')"
           echo "tag=$tag crate=$crate"
           if [ "$tag" != "$crate" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match the crate version $crate"
@@ -47,9 +47,9 @@ jobs:
 
       - run: cargo test --workspace --locked
         env:
-          ANYWHERE_TEST_NVIM: ${{ steps.nvim.outputs.executable }}
+          ANVI_TEST_NVIM: ${{ steps.nvim.outputs.executable }}
 
-      - run: cargo build --release --locked -p anywhere-nvim
+      - run: cargo build --release --locked -p anvi
 
       # 同梱する nvim は「テストに使ったもの」ではなく、配布物として毎回取り直す。
       - name: fetch nvim-win64
@@ -62,19 +62,19 @@ jobs:
           test -f nvim-win64/bin/nvim.exe
 
       # レイアウトの正は scripts/make-bundle.sh。ここで手で並べると必ずずれる。
-      # stage/anywhere-nvim が zip とインストーラの唯一の入力になる。
+      # stage/anvi が zip とインストーラの唯一の入力になる。
       - name: stage the bundle
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p stage/anywhere-nvim
-          cp target/release/anywhere-nvim.exe stage/anywhere-nvim/
-          scripts/make-bundle.sh nvim-win64 stage/anywhere-nvim
+          mkdir -p stage/anvi
+          cp target/release/anvi.exe stage/anvi/
+          scripts/make-bundle.sh nvim-win64 stage/anvi
           # 同梱 nvim のライセンスは zip に入っていないので、同じタグから取る。
-          curl -fsSL -o stage/anywhere-nvim/nvim/LICENSE.txt \
+          curl -fsSL -o stage/anvi/nvim/LICENSE.txt \
             "https://raw.githubusercontent.com/neovim/neovim/${NVIM_VERSION}/LICENSE.txt"
-          for f in LICENSE-MIT LICENSE-APACHE LICENSE-Moralerspace.txt nvim/LICENSE.txt; do
-            test -s "stage/anywhere-nvim/$f"
+          for f in LICENSE-MIT LICENSE-APACHE LICENSE-Moralerspace.txt README.md nvim/LICENSE.txt; do
+            test -s "stage/anvi/$f"
           done
 
       # 「起動はするが契約だけ死んでいる」バンドルを出さないための最終確認。
@@ -84,16 +84,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $log = "stage\host.log"
-          $proc = Start-Process -FilePath "stage\anywhere-nvim\anywhere-nvim.exe" `
-            -RedirectStandardError $log -WindowStyle Hidden -PassThru
+          # GUI サブシステムなので stderr は出ない。ログはここに出る。
+          $log = Join-Path $env:LOCALAPPDATA "anvi-data\log\anvi.log"
+          Remove-Item $log -Force -ErrorAction SilentlyContinue
+          $proc = Start-Process -FilePath "stage\anvi\anvi.exe" -PassThru
           try {
             $deadline = (Get-Date).AddSeconds(60)
             $resident = $false
             while ((Get-Date) -lt $deadline) {
               Start-Sleep -Seconds 2
               if ($proc.HasExited) { break }
-              if ((Test-Path $log) -and (Select-String -Path $log -Pattern "anywhere-nvim is resident" -Quiet)) {
+              if ((Test-Path $log) -and (Select-String -Path $log -Pattern "anvi is resident" -Quiet)) {
                 $resident = $true
                 break
               }
@@ -105,7 +106,6 @@ jobs:
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
             Get-Process nvim -ErrorAction SilentlyContinue | Stop-Process -Force
-            Remove-Item $log -Force -ErrorAction SilentlyContinue
           }
 
       - name: package the portable zip
@@ -113,18 +113,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          (cd stage && 7z a -tzip "../dist/anywhere-nvim-${GITHUB_REF_NAME}-windows-x64-portable.zip" anywhere-nvim > /dev/null)
+          (cd stage && 7z a -tzip "../dist/anvi-${GITHUB_REF_NAME}-windows-x64-portable.zip" anvi > /dev/null)
 
       - name: compile the installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $version = "${{ github.ref_name }}" -replace '^v', ''
-          $stageDir = (Resolve-Path "stage/anywhere-nvim").Path
+          $stageDir = (Resolve-Path "stage/anvi").Path
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc "/DAppVersion=$version" "/DStageDir=$stageDir" "installer\anywhere-nvim.iss"
+          & $iscc "/DAppVersion=$version" "/DStageDir=$stageDir" "installer\anvi.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
-          $setup = "dist/anywhere-nvim-${{ github.ref_name }}-windows-x64-setup.exe"
+          $setup = "dist/anvi-${{ github.ref_name }}-windows-x64-setup.exe"
           if (-not (Test-Path $setup)) { throw "missing installer artifact: $setup" }
 
       # インストーラは「入れて消えること」まで見ないと壊れていても気付けない。
@@ -134,10 +134,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $setup = (Resolve-Path "dist/anywhere-nvim-${{ github.ref_name }}-windows-x64-setup.exe").Path
-          $installDir = Join-Path $env:LOCALAPPDATA "Programs\anywhere-nvim"
-          $configDir = Join-Path $env:LOCALAPPDATA "anywhere-nvim"
-          $stateDir = Join-Path $env:LOCALAPPDATA "anywhere-nvim-data"
+          $setup = (Resolve-Path "dist/anvi-${{ github.ref_name }}-windows-x64-setup.exe").Path
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\anvi"
+          $configDir = Join-Path $env:LOCALAPPDATA "anvi"
+          $stateDir = Join-Path $env:LOCALAPPDATA "anvi-data"
           $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 
           $install = Start-Process -FilePath $setup `
@@ -145,9 +145,9 @@ jobs:
           if ($install.ExitCode -ne 0) { throw "installer exited with code $($install.ExitCode)" }
 
           foreach ($path in @(
-            "$installDir\anywhere-nvim.exe",
+            "$installDir\anvi.exe",
             "$installDir\runtime\init.lua",
-            "$installDir\runtime\lua\anywhere\init.lua",
+            "$installDir\runtime\lua\anvi\init.lua",
             "$installDir\nvim\bin\nvim.exe",
             "$installDir\nvim\share\nvim\runtime"
           )) {
@@ -156,7 +156,7 @@ jobs:
           & "$installDir\nvim\bin\nvim.exe" --headless +q
           if ($LASTEXITCODE -ne 0) { throw "the installed nvim.exe failed to run" }
           # startup タスクは既定で有効。silent インストールでも既定が適用される。
-          if (-not (Get-ItemProperty -Path $runKey -Name "anywhere-nvim" -ErrorAction SilentlyContinue)) {
+          if (-not (Get-ItemProperty -Path $runKey -Name "anvi" -ErrorAction SilentlyContinue)) {
             throw "the startup registry value was not created"
           }
 
@@ -177,7 +177,7 @@ jobs:
             Start-Sleep -Seconds 1
           }
           if (-not $removed) { throw "install directory remains after uninstall: $installDir" }
-          if (Get-ItemProperty -Path $runKey -Name "anywhere-nvim" -ErrorAction SilentlyContinue) {
+          if (Get-ItemProperty -Path $runKey -Name "anvi" -ErrorAction SilentlyContinue) {
             throw "the startup registry value survived the uninstall"
           }
           # /KEEPDATA を付けたアンインストールでは、ユーザーデータは
@@ -189,7 +189,7 @@ jobs:
           $reinstall = Start-Process -FilePath $setup `
             -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait -PassThru
           if ($reinstall.ExitCode -ne 0) { throw "re-installer exited with code $($reinstall.ExitCode)" }
-          if (-not (Test-Path "$installDir\anywhere-nvim.exe")) { throw "re-install did not place anywhere-nvim.exe" }
+          if (-not (Test-Path "$installDir\anvi.exe")) { throw "re-install did not place anvi.exe" }
           $defaultUninstall = Start-Process -FilePath (Join-Path $installDir "unins000.exe") `
             -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait -PassThru
           if ($defaultUninstall.ExitCode -ne 0) { throw "uninstaller exited with code $($defaultUninstall.ExitCode)" }
@@ -209,8 +209,8 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          for f in "anywhere-nvim-${GITHUB_REF_NAME}-windows-x64-portable.zip" \
-                   "anywhere-nvim-${GITHUB_REF_NAME}-windows-x64-setup.exe"; do
+          for f in "anvi-${GITHUB_REF_NAME}-windows-x64-portable.zip" \
+                   "anvi-${GITHUB_REF_NAME}-windows-x64-setup.exe"; do
             sha256sum "$f" > "$f.sha256"
           done
 
@@ -220,7 +220,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          base="anywhere-nvim-${GITHUB_REF_NAME}-windows-x64"
+          base="anvi-${GITHUB_REF_NAME}-windows-x64"
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \

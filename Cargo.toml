@@ -1,20 +1,20 @@
 [workspace]
 resolver = "3"
-members = ["crates/anywhere-core", "crates/anywhere-nvim"]
-# anywhere-nvim is a Windows-only binary. On the dev machine (Linux) only the
+members = ["crates/anvi-core", "crates/anvi"]
+# anvi is a Windows-only binary. On the dev machine (Linux) only the
 # portable core is built/tested; the binary is built with
-#   cargo xwin build -p anywhere-nvim --target x86_64-pc-windows-msvc
-default-members = ["crates/anywhere-core"]
+#   cargo xwin build -p anvi --target x86_64-pc-windows-msvc
+default-members = ["crates/anvi-core"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
 
 [workspace.dependencies]
-anywhere-core = { path = "crates/anywhere-core" }
+anvi-core = { path = "crates/anvi-core" }
 async-trait = "0.1.91"
 anyhow = "1.0.104"
 nvim-rs = { version = "0.9.2", features = ["use_tokio"] }
