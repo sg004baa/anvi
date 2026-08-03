@@ -492,13 +492,20 @@ winit は既にインライン IME として振る舞う（→ 4.2）。host が
 
 ### 8.1 優先順位
 
-| 順位 | 手段 | 取得可否 |
-|---|---|---|
-| 1 | UI Automation `ValuePattern` の `CurrentValue` | ◎ |
-| 2 | UI Automation `TextPattern` の `DocumentRange` | ○（読み取りのみ） |
-| 3 | `Ctrl+A` → `Ctrl+C` → クリップボード読み取り | △ |
+`IUIAutomation::GetFocusedElement()` でフォーカス中の要素を取得する。相手が Chromium 系
+（`FrameworkId == "Chrome"`。Chrome / Edge / Electron）なら 9.5 の理由で UIA のテキストを
+使わず、クリップボード経路で取得する。それ以外は上から順に試す。
 
-`IUIAutomation::GetFocusedElement()` でフォーカス中の要素を取得し、上から順に試す。
+| 相手 | 順位 | 手段 | 取得可否 |
+|---|---|---|---|
+| Chromium 系 | — | `Ctrl+A` → `Ctrl+C` → クリップボード読み取り | ◎（空行が保たれる唯一の手段。9.5） |
+| それ以外 | 1 | UI Automation `ValuePattern` の `CurrentValue` | ◎ |
+| それ以外 | 2 | UI Automation `TextPattern` の `DocumentRange` | ○（読み取りのみ） |
+| それ以外 | 3 | `Ctrl+A` → `Ctrl+C` → クリップボード読み取り | △ |
+
+Chromium 系でクリップボード取得ができなかった場合は**明確なエラーにする**（UIA へ戻る
+代替経路は持たない。空行が落ちたテキストで編集を始めるのは、書き戻しで相手の内容を
+壊すことと同じである）。編集系と確認できない要素にキーを注入しない条件は 8.3 と共通。
 
 ### 8.2 クリップボード fallback の注意
 
@@ -524,6 +531,9 @@ UIA 経路で取得できなかった（フォーカス要素が特定できな�
 Windows アプリから取得するテキストは `\r\n` / `\n` が混在しうる。
 
 - 取得時: `\r\n` / `\n` / `\r` のいずれも行区切りとして分割し、内部表現は常に行配列（nvim バッファの行）に正規化する
+  - 3 種類とも実在する。実機のメモ帳（Windows 11）の `ValuePattern` は複数行を**裸の `\r`
+    区切り**で返す（`"hoge\r\rmoge"` = `hoge` / 空行 / `moge`）。Chromium 系のクリップボードは
+    `\r\n` 区切りである
 - **末尾の改行は「終端子」として扱い、空行にしない。** 実機のメモ帳は 1 行の内容でも `ValuePattern` の値に末尾改行を含めて返す（`"abc\r\n"`）。これをそのまま行配列にすると 1 行の入力欄が nvim で 2 行になり、書き戻しで元々無かった改行が生える。落とすのは末尾 1 つだけなので、意図的な末尾の空行（`"a\n\n"` → `["a", ""]`）は保たれる
 - 書き戻し時: `\r\n` で結合する。クリップボード（`CF_UNICODETEXT`）の慣習は `\r\n` であり、旧来の EDIT コントロールは裸の `\n` を正しく表示できない。UIA `SetValue` も同様に `\r\n` とする。**末尾には改行を付けない**（取得時に終端子として落としているため、往復は末尾改行 1 つ分だけ非対称になる。これは意図的）
 
@@ -537,7 +547,9 @@ Windows アプリから取得するテキストは `\r\n` / `\n` が混在しう
 |---|---|
 | `ValuePattern`（`IsReadOnly=false`） | `SetValue()` で直接書き込む |
 | `TextPattern` のみ | クリップボード貼り付け |
-| クリップボード | クリップボード貼り付け |
+| クリップボード（Chromium 系は必ずここ → 8.1 / 9.5） | クリップボード貼り付け |
+
+相手ごとの分岐は取得側（8.1）の 1 か所だけで、書き戻しは取得経路をそのまま引き継ぐ。
 
 取得時の `IUIAutomationElement` は、編集中に対象アプリが UI を再構築すると stale になりうる。書き戻し時はフォーカス復帰後に `GetFocusedElement` を取り直し、RuntimeId が取得時のものと一致すればそれを使う。一致しない・取れない場合は保持していた要素で `SetValue` を試み、失敗したらクリップボード貼り付けに落とす。
 
@@ -563,34 +575,48 @@ Windows アプリから取得するテキストは `\r\n` / `\n` が混在しう
 
 編集前後で内容が一致する場合は書き戻しをスキップする。相手アプリの undo 履歴を無駄に汚さないため。
 
-### 9.5 Chromium 系への複数行の書き戻しは貼り付けにする
+### 9.5 Chromium 系は UIA のテキストを信用しない
 
-結合は常に `\r\n`（`CF_UNICODETEXT` の慣習。旧来の EDIT コントロールもこれを要求する）。
-変えるのは **経路** のほうである。
+Chromium 系（`FrameworkId == "Chrome"`。Chrome / Edge / Electron。Slack もこれ）は、
+取得も書き戻しもクリップボード経路で行う。UIA のテキストが**両方向で空行を壊す**ためである。
 
-| 相手 | 行数 | 経路 |
-|---|---|---|
-| Chromium 系（`FrameworkId == "Chrome"`。Chrome / Edge / Electron） | 2 行以上 | 貼り付け |
-| Chromium 系 | 1 行 | `SetValue`（改行が無いので問題は起きない。クリップボードを奪わない） |
-| それ以外 | 何行でも | `SetValue` |
+- 取得: `ValuePattern` の `CurrentValue` と `TextPattern` の `DocumentRange` は、
+  **ブロック要素として空の行を落とす**
+- 書き戻し: `SetValue` は**改行のたびに段落を割る**。段落は平文化すると空行になるので、
+  1 回の書き戻しごとに改行が増えていく
 
-Slack の入力欄は `contenteditable` でありながら書き込み可能な `ValuePattern` を持つため、
-素直に書くと `SetValue` 経路に乗る。ところが **Chromium の `SetValue` は改行のたびに段落を
-割る**。段落は平文化すると空行になるので、1 回の書き戻しごとに改行が増えていく。
+Chromium の `contenteditable` は 1 行につき 1 ブロック（`<div>` / `<p>`）で構成されるのが
+普通で（Slack / Quill もこの形）、空行はテキストを持たないブロック（`<div><br></div>`）になる。
 
-実測（2026-08-02, Slack デスクトップ）:
+取得の実測（2026-08-04, Chrome。`<div>dvhoge</div><div><br></div><div>dvmoge</div>` を
+`role="textbox"` の `contenteditable` に入れ、同じ要素へ 3 手段を当てた）:
+
+| 取得手段 | 得られたテキスト |
+|---|---|
+| `ValuePattern` の `CurrentValue` | `"dvhoge\ndvmoge"` ❌ 空行が消える |
+| `TextPattern` の `DocumentRange` | `"dvhoge\ndvmoge"` ❌ 同じ |
+| `Ctrl+A` → `Ctrl+C` | `"dvhoge\r\n\r\ndvmoge"` ✅ |
+
+落ちるのはブロックが空の行だけである。同じ Chrome でも `<textarea>` や 1 つのブロック内の
+`<br><br>` なら `ValuePattern` でも空行は残る（どちらも `"hoge\n\nmoge"`）。相手の DOM 構造で
+結果が変わる以上、Chromium 系かどうかだけで経路を決める。要素ごとの推測はしない。
+
+書き戻しの実測（2026-08-02, Slack デスクトップ。入力欄は `contenteditable` でありながら
+書き込み可能な `ValuePattern` を持つ）:
 
 | やったこと | 入力欄の中身（`Ctrl+A` `Ctrl+C` で確認） |
 |---|---|
-| 手で `"AAA\r\nBBB"` を `Ctrl+V` | `AAA\nBBB` ✅ |
+| `Ctrl+V` で `"AAA\r\nBBB"` を貼る | `AAA\nBBB` ✅ |
 | `SetValue("AAA\r\nBBB")` | `AAA\n\nBBB` ❌ |
 | `SetValue("AAA\nBBB")` | `AAA\n\nBBB` ❌（`\r` の有無は無関係） |
-| 貼り付け経路へ変更後 | `AAA\nBBB` ✅ |
 
-取得側は無実（Slack から `Ctrl+C` すると `AAA\nBBB`）。**`\n` へ変えるだけでは直らない**
-ことを確認済みなので、ここを「改行コードの問題」として蒸し返さないこと。
+結合は常に `\r\n`（8.4）。**改行コードの問題ではない**ので、ここを「`\n` にすれば直る」と
+蒸し返さないこと。変えるのは経路のほうである。
 
-判定材料はログに出す（`captured route=Value framework="Chrome"`）。相手が増えたら
+往復の実測（2026-08-04, Chrome の上記 `contenteditable`）: 取得 → nvim で 1 行目に `!` を
+足す → `ZZ` → 入力欄は `dvhoge!\r\n\r\ndvmoge`。空行は取得・書き戻しの両方で保たれる。
+
+判定材料はログに出す（`captured route=Clipboard framework="Chrome"`）。相手が増えたら
 まずこの行を見ること。
 
 ---
@@ -602,10 +628,10 @@ Slack の入力欄は `contenteditable` でありながら書き込み可能な 
 ### 10.1 Electron 系アプリ（Slack / Discord など）
 
 `contenteditable` だが、**書き込み可能な `ValuePattern` は持っている**（Slack で実測。
-`FrameworkId = "Chrome"`）。ただし `SetValue` は改行のたびに段落を割るため、複数行は
-貼り付けで書き戻す（→ 9.5）。
+`FrameworkId = "Chrome"`）。それでも UIA のテキストは空行を壊すので、取得も書き戻しも
+クリップボード経路になる（→ 9.5）。
 
-つまり救えないわけではない。ただし貼り付け経路である以上、クリップボードを一時的に
+つまり救えないわけではない。ただしクリップボード経路である以上、クリップボードを一時的に
 奪う（→ 10.4）ことと、10.2 の連投事故は残る。
 
 ### 10.2 改行が送信になるアプリ

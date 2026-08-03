@@ -77,9 +77,6 @@ struct Target {
     /// 取得時の RuntimeId。取得できない要素もあるため `Option`。
     runtime_id: Option<Vec<i32>>,
     hwnd: isize,
-    /// 相手が Chromium 系（`FrameworkId = "Chrome"`。Electron もこれ）か。
-    /// 書き戻しの改行コードを決めるのに使う (§9.5)。
-    chromium: bool,
 }
 
 enum Job {
@@ -229,14 +226,49 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
         return Ok(None);
     };
 
+    let framework = framework_id(&element);
+
+    // Chromium 系（Chrome / Edge / Electron）は UIA のテキストを信用しない (§8.1)。
+    // 空段落が落ちるので、この相手だけはクリップボードで取得する。
+    if framework.as_deref() == Some(CHROMIUM_FRAMEWORK) {
+        if !is_edit_like(&element) {
+            tracing::debug!("編集系の要素と確認できない: キー注入せず編集対象なしとして扱う");
+            return Ok(None);
+        }
+        let text = capture_via_clipboard()
+            .context("Chromium 系の入力欄からクリップボード経由で取得できなかった")?;
+        return Ok(Some(retain(
+            slot,
+            element,
+            Route::Clipboard,
+            hwnd,
+            framework,
+            &text,
+        )));
+    }
+
     // 1. ValuePattern (§8.1)
     if let Some(text) = value_pattern_text(&element) {
-        return Ok(Some(retain(slot, element, Route::Value, hwnd, &text)));
+        return Ok(Some(retain(
+            slot,
+            element,
+            Route::Value,
+            hwnd,
+            framework,
+            &text,
+        )));
     }
 
     // 2. TextPattern。読み取り専用なので書き戻しは貼り付けになる (§9.1)
     if let Some(text) = text_pattern_text(&element) {
-        return Ok(Some(retain(slot, element, Route::TextPattern, hwnd, &text)));
+        return Ok(Some(retain(
+            slot,
+            element,
+            Route::TextPattern,
+            hwnd,
+            framework,
+            &text,
+        )));
     }
 
     // 3. クリップボード fallback。編集系と確認できない相手にキーを撃ち込まない (§8.3)
@@ -245,7 +277,14 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
         return Ok(None);
     }
     let text = capture_via_clipboard()?;
-    Ok(Some(retain(slot, element, Route::Clipboard, hwnd, &text)))
+    Ok(Some(retain(
+        slot,
+        element,
+        Route::Clipboard,
+        hwnd,
+        framework,
+        &text,
+    )))
 }
 
 fn retain(
@@ -253,12 +292,11 @@ fn retain(
     element: IUIAutomationElement,
     route: Route,
     hwnd: isize,
+    framework: Option<String>,
     text: &str,
 ) -> Captured {
     let lines = to_lines(text);
     let runtime_id = runtime_id(&element);
-    let framework = framework_id(&element);
-    let chromium = framework.as_deref() == Some(CHROMIUM_FRAMEWORK);
     // どの経路を通ったかは不具合報告の一次情報になるので、セッション毎に 1 行残す。
     tracing::info!(
         ?route,
@@ -273,7 +311,6 @@ fn retain(
         element,
         runtime_id,
         hwnd,
-        chromium,
     });
     Captured { lines, hwnd }
 }
@@ -281,15 +318,10 @@ fn retain(
 /// 書き戻す (§9.1)。
 fn write_back(uia: &IUIAutomation, target: Option<&Target>, lines: &[String]) -> Result<()> {
     let target = target.context("書き戻し対象が保持されていない")?;
-    // 結合は常に CRLF。`CF_UNICODETEXT` の慣習でもあり、貼り付けなら Chromium 系でも
-    // 1 つの改行として入る（Slack で実測）。
+    // 結合は常に CRLF（`CF_UNICODETEXT` の慣習。旧来の EDIT コントロールもこれを要求する）。
     let text = to_crlf(lines);
 
-    // Chromium 系（Electron 含む）の `SetValue` は改行のたびに段落を割り、結果として
-    // 改行が二重になる。`\n` だけで渡しても同じ（§9.5）。複数行はキー注入の
-    // 貼り付けへ回すしかない。1 行ならこの問題は起きないので、クリップボードを
-    // 奪わない `SetValue` のままにする。
-    if target.route.is_paste() || (target.chromium && lines.len() > 1) {
+    if target.route.is_paste() {
         return paste_back(target, &text);
     }
 
