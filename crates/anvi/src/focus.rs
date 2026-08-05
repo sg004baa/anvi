@@ -83,8 +83,9 @@ pub fn set_foreground(raw: isize) -> anyhow::Result<()> {
     bail!("SetForegroundWindow was refused for {raw:#x} (returned {brought})");
 }
 
-/// トップレベルの祖先。子コントロールの HWND を渡されても前面化できるようにする。
-fn root_of(hwnd: HWND) -> HWND {
+/// トップレベルの祖先。子コントロールの HWND を渡されても前面化や位置決めが
+/// できるようにする。
+pub fn root_of(hwnd: HWND) -> HWND {
     // SAFETY: 問い合わせのみ。無効な HWND でも NULL を返すだけ。
     let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
     if root.is_invalid() { hwnd } else { root }

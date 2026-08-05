@@ -69,7 +69,12 @@ pub enum UserEvent {
     /// メニュー項目を持っている [`Tray`] 側で行う（ハンドラは `Send` 制約で
     /// 項目を掴めない）。
     ToggleAutostart,
-    Show,
+    /// 編集ウィンドウを出す。`target` は編集対象の入力欄の HWND で、ウィンドウは
+    /// それと同じモニタの、対象ウィンドウに重なる位置へ出す（DESIGN 7.2）。
+    /// HWND は `!Send` なのでスレッドを跨ぐ経路では `isize` で運ぶ。
+    Show {
+        target: isize,
+    },
     Hide,
     Focus,
     Quit,
@@ -180,7 +185,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Redraw(batch) => self.on_redraw(&batch),
-            UserEvent::Show => self.on_show(event_loop),
+            UserEvent::Show { target } => self.on_show(target),
             UserEvent::Hide => match self.surface.as_ref() {
                 Some(surface) => window::hide(&surface.window),
                 None => tracing::debug!("hide requested before the window exists"),
@@ -364,12 +369,12 @@ impl App {
         });
     }
 
-    fn on_show(&mut self, event_loop: &ActiveEventLoop) {
+    fn on_show(&mut self, target: isize) {
         let Some(surface) = self.surface.as_ref() else {
             tracing::error!("show requested before the window exists");
             return;
         };
-        if let Err(err) = window::show(event_loop, &surface.window, surface.hwnd) {
+        if let Err(err) = window::show(&surface.window, surface.hwnd, target) {
             tracing::error!(%err, "cannot bring the editor window to the front");
         }
     }

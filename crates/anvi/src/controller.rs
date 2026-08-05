@@ -217,7 +217,9 @@ impl Controller {
         self.target_hwnd = captured.hwnd;
         self.session.begin_edit(captured.lines);
 
-        if let Err(err) = self.proxy.send_event(UserEvent::Show) {
+        if let Err(err) = self.proxy.send_event(UserEvent::Show {
+            target: self.target_hwnd,
+        }) {
             // 画面が出ないなら編集できない。掴んだセッションを畳んで Idle へ戻す。
             self.session.reset();
             return Err(anyhow!("the gui event loop is gone: {err}"));
