@@ -7,9 +7,10 @@
 //! どちらも起動できなければテストは失敗する（スキップしない）。
 
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use anvi_core::clipboard::Memory;
 use anvi_core::{Applied, HostEvent, NvimConfig, NvimServer, Phase, Session};
 use nvim_rs::rpc::handler::Dummy;
 use tokio::io::WriteHalf;
@@ -68,6 +69,7 @@ async fn start(appname: &str) -> (NvimServer, UnboundedReceiver<HostEvent>, Clie
         nvim_exe: nvim_exe(),
         runtime_dir: runtime_dir(),
         appname: appname.to_owned(),
+        clipboard: Arc::new(Memory::default()),
     };
     let (server, handles) = NvimServer::spawn(&cfg)
         .await

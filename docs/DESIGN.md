@@ -272,6 +272,7 @@ UI は host 自身が持つため、同梱する exe は nvim だけ。システ
 - `:w` の乗っ取り
 - `:q` 系の乗っ取り
 - 異常終了時の通知
+- `vim.g.clipboard` provider の登録（→ 5.6）
 
 見た目やキーマップは同梱コアには入れない。ローカル設定側の領分とする。
 
@@ -348,6 +349,70 @@ init.lua は起動時点では host のチャンネル ID を知らない。以�
 
 以降 init.lua 側は `vim.rpcnotify(host_chan, ...)` で host に通知できる。
 
+### 5.6 クリップボード連携（nvim の `"+` / `"*` レジスタ）
+
+同梱 nvim は Windows ではクリップボード provider を持たない。nvim は win32yank などの
+外部ツールに依存するが、同梱物に exe を増やしたくない。**host 自身を provider の実体にする。**
+
+同梱コアが `vim.g.clipboard` を登録し、`copy` / `paste` の中身は host への
+`vim.rpcrequest` にする（実装は付録 A）。host は Win32 のクリップボードを直に叩く
+（8.2 の fallback で使っているものと同じコード）。
+
+| 方向 | request | 引数 | 戻り値 |
+|---|---|---|---|
+| 貼り付け（`"+p`） | `clipboard_get` | なし | `[lines, regtype]` |
+| ヤンク（`"+y`） | `clipboard_set` | `[lines]` | なし |
+
+`lines` は行配列、`regtype` は `setreg()` の規約（`v` = 文字指向 / `V` = 行指向）。
+**regtype が載るのは取得方向だけである。**
+
+#### コピー方向は regtype を見ない
+
+nvim が `copy` に渡してくる `lines` は、行指向・矩形指向のとき**末尾に空文字列の要素が
+付いている**。つまり CRLF で結合するだけで末尾改行が自然に生える。host が regtype を見て
+`\r\n` を足すと二重になる（実際に一度やって `"日本語\r\n\r\n"` になった）。
+**`clipboard_set` は regtype を受け取らないし、見ない。**
+
+実測（2026-08-06、同梱 nvim）:
+
+| ヤンク | `lines` | `regtype` |
+|---|---|---|
+| `"+yy`（1 行・行指向） | `{"abc", ""}` | `"V"` |
+| `"+yj`（2 行・行指向） | `{"abc", "def", ""}` | `"V"` |
+| `"+yw`（文字指向） | `{"abc"}` | `"v"` |
+| `<C-v>` で 2 行（矩形指向） | `{"ab", "ef", ""}` | `"b"` |
+
+矩形指向の regtype は `"\x16{幅}"` ではなく **`"b"`** で来る。`setreg()` の規約とは違う。
+`"\x16{幅}"` を前提にパースすると矩形ヤンクだけが nvim 側でエラーになる。コピー方向で
+regtype を見ない以上どうでもよい事実だが、見ようとすると必ず踏む。
+
+#### 末尾改行が行指向の印（取得方向）
+
+OS のクリップボードには regtype が載らない。**取得方向だけが判定を持つ。**
+生テキストが改行で終わっていれば `V`、そうでなければ `v` を返す。返す `lines` に
+末尾の空要素は要らない（`{{"L1"}, "V"}` を返せば行指向で貼れることを実測で確認済み）。
+
+**8.4 の「書き戻しでは末尾改行を付けない」とはここだけ意図的に違う。** 8.4 は入力欄との
+往復の話で、末尾改行は入力欄が付けてきた終端子でしかない。こちらは他アプリの
+クリップボードとの往復の話で、末尾改行は行指向を伝える唯一の手がかりである。だから
+コピー方向では nvim が末尾の空要素として付けて渡してくるし、取得方向ではそれを読む。
+
+矩形指向は幅を OS のクリップボードから復元できない。貼り付け時は行指向になる。
+
+#### `cache_enabled = 0`
+
+nvim 側のキャッシュを切る。Windows 側で後からコピーされた内容を必ず読むため。
+
+#### デッドロックの注意
+
+`vim.rpcrequest` は応答が返るまで nvim を待たせる。**host のリクエストハンドラから nvim を
+呼び返してはいけない。** Win32 の呼び出しもブロックしうるので `spawn_blocking` に逃がす。
+
+#### `clipboard` オプションは設定しない
+
+`unnamedplus` などは同梱コアで設定しない。オプションはローカル設定の領分（→ 5.4）。
+同梱コアは provider を用意するところまでを担う。
+
 ---
 
 ## 6. セッションのライフサイクル
@@ -416,7 +481,7 @@ Idle ──[ホットキー]──> Capturing ──[取得成功]──> Editin
 
 winit で作る。`visible=false` / `active=false` / `skip_taskbar=true` で、**作った時点では画面に出ないしフォーカスも奪わない**。v1 の「画面外へ飛ばしてから隠す」待避は不要になった。
 
-**タイトルバーは出さない**（`decorations=false`）。中央に出して `ZZ` / `ZQ` で閉じる 1 枚窓であり、閉じる・最大化のボタンにも枠にも役割が無い。
+**タイトルバーは出さない**（`decorations=false`）。編集対象に重ねて出し `ZZ` / `ZQ` で閉じる 1 枚窓であり、閉じる・最大化のボタンにも枠にも役割が無い。
 
 #### 透過（背景のみ）・枠線・余白
 
@@ -462,10 +527,22 @@ D3D11 デバイス → D2D デバイスコンテキスト → 合成用スワッ
 | タイミング | 操作 |
 |---|---|
 | 起動時 | 生成時点で非表示。何も見えない |
-| 表示時 | プライマリモニタ中央へ移動 → `set_visible(true)` → フォーカス（→ 7.3） |
+| 表示時 | 対象ウィンドウに重ねて移動（→ 位置決め）→ `set_visible(true)` → フォーカス（→ 7.3） |
 | 終了時 | `set_visible(false)` → 対象アプリへフォーカス復帰 |
 
 ウィンドウの × はウィンドウを壊さず、`AnviQuit`（= `ZQ`、破棄）として nvim へ流す。セッション外の × は無視する。
+
+#### 位置決め
+
+編集ウィンドウは**編集対象と同じモニタで、対象ウィンドウの中心に重ねて**出す。目線とマウスがある場所へ出すのが編集の始まりであり、別のモニタや対象から離れた場所に出てはならない。
+
+- 対象は UIA が返す入力欄の HWND だが、矩形もモニタも `GA_ROOT` を解決したトップレベルウィンドウで見る（7.3 と同じ理由。UIA が返すのは子コントロール）
+- 載っているモニタは `MonitorFromWindow(MONITOR_DEFAULTTONEAREST)`、置ける範囲は `GetMonitorInfoW` の **`rcWork`**（タスクバーの下に潜らない）
+- 対象矩形の中心へ編集ウィンドウの中心を合わせ、`rcWork` からはみ出す分は中へ押し戻す。`rcWork` より大きい辺は左上端へ寄せる（はみ出しは右下へ出す）
+- 幾何計算は `window::place_over` の純関数で、Win32 の問い合わせと分離してテストしてある。座標はセカンダリモニタで負になり、仮想スクリーンの端で i32 を溢れうるので加減算は `saturating_*`
+- 位置決めに失敗したらログ（`error`）を残して**表示は続ける**。決め打ちの位置へ落とす代替経路は持たない
+
+既存セッションへ戻る（Idle でないときのホットキー、7.3 のフォーカスだけの経路）ではウィンドウを動かさない。編集中に位置が跳ねるほうが害が大きい。
 
 ### 7.3 フォーカス復帰
 
@@ -492,13 +569,20 @@ winit は既にインライン IME として振る舞う（→ 4.2）。host が
 
 ### 8.1 優先順位
 
-| 順位 | 手段 | 取得可否 |
-|---|---|---|
-| 1 | UI Automation `ValuePattern` の `CurrentValue` | ◎ |
-| 2 | UI Automation `TextPattern` の `DocumentRange` | ○（読み取りのみ） |
-| 3 | `Ctrl+A` → `Ctrl+C` → クリップボード読み取り | △ |
+`IUIAutomation::GetFocusedElement()` でフォーカス中の要素を取得する。相手が Chromium 系
+（`FrameworkId == "Chrome"`。Chrome / Edge / Electron）なら 9.5 の理由で UIA のテキストを
+使わず、クリップボード経路で取得する。それ以外は上から順に試す。
 
-`IUIAutomation::GetFocusedElement()` でフォーカス中の要素を取得し、上から順に試す。
+| 相手 | 順位 | 手段 | 取得可否 |
+|---|---|---|---|
+| Chromium 系 | — | `Ctrl+A` → `Ctrl+C` → クリップボード読み取り | ◎（空行が保たれる唯一の手段。9.5） |
+| それ以外 | 1 | UI Automation `ValuePattern` の `CurrentValue` | ◎ |
+| それ以外 | 2 | UI Automation `TextPattern` の `DocumentRange` | ○（読み取りのみ） |
+| それ以外 | 3 | `Ctrl+A` → `Ctrl+C` → クリップボード読み取り | △ |
+
+Chromium 系でクリップボード取得ができなかった場合は**明確なエラーにする**（UIA へ戻る
+代替経路は持たない。空行が落ちたテキストで編集を始めるのは、書き戻しで相手の内容を
+壊すことと同じである）。編集系と確認できない要素にキーを注入しない条件は 8.3 と共通。
 
 ### 8.2 クリップボード fallback の注意
 
@@ -524,6 +608,9 @@ UIA 経路で取得できなかった（フォーカス要素が特定できな�
 Windows アプリから取得するテキストは `\r\n` / `\n` が混在しうる。
 
 - 取得時: `\r\n` / `\n` / `\r` のいずれも行区切りとして分割し、内部表現は常に行配列（nvim バッファの行）に正規化する
+  - 3 種類とも実在する。実機のメモ帳（Windows 11）の `ValuePattern` は複数行を**裸の `\r`
+    区切り**で返す（`"hoge\r\rmoge"` = `hoge` / 空行 / `moge`）。Chromium 系のクリップボードは
+    `\r\n` 区切りである
 - **末尾の改行は「終端子」として扱い、空行にしない。** 実機のメモ帳は 1 行の内容でも `ValuePattern` の値に末尾改行を含めて返す（`"abc\r\n"`）。これをそのまま行配列にすると 1 行の入力欄が nvim で 2 行になり、書き戻しで元々無かった改行が生える。落とすのは末尾 1 つだけなので、意図的な末尾の空行（`"a\n\n"` → `["a", ""]`）は保たれる
 - 書き戻し時: `\r\n` で結合する。クリップボード（`CF_UNICODETEXT`）の慣習は `\r\n` であり、旧来の EDIT コントロールは裸の `\n` を正しく表示できない。UIA `SetValue` も同様に `\r\n` とする。**末尾には改行を付けない**（取得時に終端子として落としているため、往復は末尾改行 1 つ分だけ非対称になる。これは意図的）
 
@@ -537,7 +624,9 @@ Windows アプリから取得するテキストは `\r\n` / `\n` が混在しう
 |---|---|
 | `ValuePattern`（`IsReadOnly=false`） | `SetValue()` で直接書き込む |
 | `TextPattern` のみ | クリップボード貼り付け |
-| クリップボード | クリップボード貼り付け |
+| クリップボード（Chromium 系は必ずここ → 8.1 / 9.5） | クリップボード貼り付け |
+
+相手ごとの分岐は取得側（8.1）の 1 か所だけで、書き戻しは取得経路をそのまま引き継ぐ。
 
 取得時の `IUIAutomationElement` は、編集中に対象アプリが UI を再構築すると stale になりうる。書き戻し時はフォーカス復帰後に `GetFocusedElement` を取り直し、RuntimeId が取得時のものと一致すればそれを使う。一致しない・取れない場合は保持していた要素で `SetValue` を試み、失敗したらクリップボード貼り付けに落とす。
 
@@ -563,34 +652,48 @@ Windows アプリから取得するテキストは `\r\n` / `\n` が混在しう
 
 編集前後で内容が一致する場合は書き戻しをスキップする。相手アプリの undo 履歴を無駄に汚さないため。
 
-### 9.5 Chromium 系への複数行の書き戻しは貼り付けにする
+### 9.5 Chromium 系は UIA のテキストを信用しない
 
-結合は常に `\r\n`（`CF_UNICODETEXT` の慣習。旧来の EDIT コントロールもこれを要求する）。
-変えるのは **経路** のほうである。
+Chromium 系（`FrameworkId == "Chrome"`。Chrome / Edge / Electron。Slack もこれ）は、
+取得も書き戻しもクリップボード経路で行う。UIA のテキストが**両方向で空行を壊す**ためである。
 
-| 相手 | 行数 | 経路 |
-|---|---|---|
-| Chromium 系（`FrameworkId == "Chrome"`。Chrome / Edge / Electron） | 2 行以上 | 貼り付け |
-| Chromium 系 | 1 行 | `SetValue`（改行が無いので問題は起きない。クリップボードを奪わない） |
-| それ以外 | 何行でも | `SetValue` |
+- 取得: `ValuePattern` の `CurrentValue` と `TextPattern` の `DocumentRange` は、
+  **ブロック要素として空の行を落とす**
+- 書き戻し: `SetValue` は**改行のたびに段落を割る**。段落は平文化すると空行になるので、
+  1 回の書き戻しごとに改行が増えていく
 
-Slack の入力欄は `contenteditable` でありながら書き込み可能な `ValuePattern` を持つため、
-素直に書くと `SetValue` 経路に乗る。ところが **Chromium の `SetValue` は改行のたびに段落を
-割る**。段落は平文化すると空行になるので、1 回の書き戻しごとに改行が増えていく。
+Chromium の `contenteditable` は 1 行につき 1 ブロック（`<div>` / `<p>`）で構成されるのが
+普通で（Slack / Quill もこの形）、空行はテキストを持たないブロック（`<div><br></div>`）になる。
 
-実測（2026-08-02, Slack デスクトップ）:
+取得の実測（2026-08-04, Chrome。`<div>dvhoge</div><div><br></div><div>dvmoge</div>` を
+`role="textbox"` の `contenteditable` に入れ、同じ要素へ 3 手段を当てた）:
+
+| 取得手段 | 得られたテキスト |
+|---|---|
+| `ValuePattern` の `CurrentValue` | `"dvhoge\ndvmoge"` ❌ 空行が消える |
+| `TextPattern` の `DocumentRange` | `"dvhoge\ndvmoge"` ❌ 同じ |
+| `Ctrl+A` → `Ctrl+C` | `"dvhoge\r\n\r\ndvmoge"` ✅ |
+
+落ちるのはブロックが空の行だけである。同じ Chrome でも `<textarea>` や 1 つのブロック内の
+`<br><br>` なら `ValuePattern` でも空行は残る（どちらも `"hoge\n\nmoge"`）。相手の DOM 構造で
+結果が変わる以上、Chromium 系かどうかだけで経路を決める。要素ごとの推測はしない。
+
+書き戻しの実測（2026-08-02, Slack デスクトップ。入力欄は `contenteditable` でありながら
+書き込み可能な `ValuePattern` を持つ）:
 
 | やったこと | 入力欄の中身（`Ctrl+A` `Ctrl+C` で確認） |
 |---|---|
-| 手で `"AAA\r\nBBB"` を `Ctrl+V` | `AAA\nBBB` ✅ |
+| `Ctrl+V` で `"AAA\r\nBBB"` を貼る | `AAA\nBBB` ✅ |
 | `SetValue("AAA\r\nBBB")` | `AAA\n\nBBB` ❌ |
 | `SetValue("AAA\nBBB")` | `AAA\n\nBBB` ❌（`\r` の有無は無関係） |
-| 貼り付け経路へ変更後 | `AAA\nBBB` ✅ |
 
-取得側は無実（Slack から `Ctrl+C` すると `AAA\nBBB`）。**`\n` へ変えるだけでは直らない**
-ことを確認済みなので、ここを「改行コードの問題」として蒸し返さないこと。
+結合は常に `\r\n`（8.4）。**改行コードの問題ではない**ので、ここを「`\n` にすれば直る」と
+蒸し返さないこと。変えるのは経路のほうである。
 
-判定材料はログに出す（`captured route=Value framework="Chrome"`）。相手が増えたら
+往復の実測（2026-08-04, Chrome の上記 `contenteditable`）: 取得 → nvim で 1 行目に `!` を
+足す → `ZZ` → 入力欄は `dvhoge!\r\n\r\ndvmoge`。空行は取得・書き戻しの両方で保たれる。
+
+判定材料はログに出す（`captured route=Clipboard framework="Chrome"`）。相手が増えたら
 まずこの行を見ること。
 
 ---
@@ -602,10 +705,10 @@ Slack の入力欄は `contenteditable` でありながら書き込み可能な 
 ### 10.1 Electron 系アプリ（Slack / Discord など）
 
 `contenteditable` だが、**書き込み可能な `ValuePattern` は持っている**（Slack で実測。
-`FrameworkId = "Chrome"`）。ただし `SetValue` は改行のたびに段落を割るため、複数行は
-貼り付けで書き戻す（→ 9.5）。
+`FrameworkId = "Chrome"`）。それでも UIA のテキストは空行を壊すので、取得も書き戻しも
+クリップボード経路になる（→ 9.5）。
 
-つまり救えないわけではない。ただし貼り付け経路である以上、クリップボードを一時的に
+つまり救えないわけではない。ただしクリップボード経路である以上、クリップボードを一時的に
 奪う（→ 10.4）ことと、10.2 の連投事故は残る。
 
 ### 10.2 改行が送信になるアプリ
@@ -657,7 +760,7 @@ v1 では非対応。常に入力欄の全内容が対象。
 | nvim RPC | `nvim-rs` |
 | ウィンドウ / キーボード / IME | `winit`（+ `raw-window-handle` で HWND を取り出す） |
 | 描画 / Win32 / UI Automation | `windows`（Direct2D・DirectWrite・D3D11・DXGI・DirectComposition。IMM32 は winit 側） |
-| クリップボード | Win32 直叩き |
+| クリップボード | Win32 直叩き（8.2 の fallback と 5.6 の nvim レジスタ連携の両方で使う） |
 | exe リソース（アイコン / バージョン情報） | `winresource`（build-dependencies） |
 
 ### 11.2 スレッドモデル（重要）
@@ -940,6 +1043,21 @@ function M.setup()
   vim.api.nvim_create_user_command("AnviQuit", function()
     finish()
   end, { bang = true })
+
+  -- OS クリップボード（同梱 nvim は provider を持たないので host に代行させる）
+  local function host_channel()
+    if not M.host then error("anvi: host チャンネルが未登録のためクリップボードを使えない") end
+    return M.host
+  end
+  local function paste() return vim.rpcrequest(host_channel(), "clipboard_get") end
+  -- regtype は使わない。行指向なら lines の末尾に空文字列が入って渡ってくる（→ 5.6）
+  local function copy(lines, _regtype) vim.rpcrequest(host_channel(), "clipboard_set", lines) end
+  vim.g.clipboard = {
+    name = "anvi",
+    copy = { ["+"] = copy, ["*"] = copy },
+    paste = { ["+"] = paste, ["*"] = paste },
+    cache_enabled = 0,
+  }
 
   -- 見た目やオプションはここに入れない。ローカル設定の領分（→ 5.4）
 end
