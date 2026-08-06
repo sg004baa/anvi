@@ -67,6 +67,7 @@ pub fn spawn_pair(bundle: &Bundle, rt: &Handle) -> anyhow::Result<Pair> {
         nvim_exe: bundle.nvim_exe.clone(),
         runtime_dir: bundle.runtime_dir.clone(),
         appname: APPNAME.to_owned(),
+        clipboard: Arc::new(crate::clipboard::WinClipboard),
     };
     let (nvim, handles) = rt
         .block_on(NvimServer::spawn(&cfg))

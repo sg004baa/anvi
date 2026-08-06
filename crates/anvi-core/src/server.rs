@@ -3,6 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
@@ -17,6 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::clipboard::{self, Clipboard};
 use crate::event::HostEvent;
 use crate::port::pick_free_port;
 
@@ -37,6 +39,9 @@ pub struct NvimConfig {
     pub nvim_exe: PathBuf,
     pub runtime_dir: PathBuf,
     pub appname: String,
+    /// nvim の `+` / `*` レジスタの実体（→ DESIGN §5.4）。同梱 nvim は headless で
+    /// 外部プロバイダを持たないため、`g:clipboard` は host への request になる。
+    pub clipboard: Arc<dyn Clipboard>,
 }
 
 /// [`NvimServer::spawn`] が返す受信口一式。
@@ -90,6 +95,7 @@ impl NvimServer {
         let handler = EventHandler {
             host: host_tx,
             redraw: redraw_tx,
+            clipboard: cfg.clipboard.clone(),
         };
         let mut failures = Vec::new();
 
@@ -385,6 +391,7 @@ fn watch_io(
 struct EventHandler {
     host: UnboundedSender<HostEvent>,
     redraw: UnboundedSender<Vec<Value>>,
+    clipboard: Arc<dyn Clipboard>,
 }
 
 #[async_trait::async_trait]
@@ -418,6 +425,79 @@ impl Handler for EventHandler {
             Err(e) => error!(notification = name, "malformed notification from nvim: {e}"),
         }
     }
+
+    /// nvim からの request の受け口。
+    ///
+    /// 来るのは `g:clipboard` provider の 2 本だけ（→ DESIGN §5.4）。`clipboard_get` は
+    /// 引数なしで `[lines, regtype]` を返し、`clipboard_set` は `[lines]` だけを受けて
+    /// `nil` を返す（コピー方向が regtype を受け取らない理由は [`crate::clipboard`]）。
+    /// 未知の名前も壊れた payload も握り潰さず `Err` にする。nvim 側では
+    /// `rpcrequest` のエラーとして見える。
+    ///
+    /// **この中から nvim を呼び返してはならない。** `vim.rpcrequest` は返事が来る
+    /// まで nvim を止めるので、その返事を作る側が nvim へ問い合わせると相互待ちに
+    /// なる（デッドロック）。だから `_nvim` は使わない。
+    async fn handle_request(
+        &self,
+        name: String,
+        args: Vec<Value>,
+        _nvim: Neovim<HostWriter>,
+    ) -> Result<Value, Value> {
+        match name.as_str() {
+            "clipboard_get" => {
+                let clip = self.clipboard.clone();
+                let raw = off_loop(move || clip.get()).await?;
+                let (lines, regtype) = clipboard::to_register(&raw);
+                Ok(Value::Array(vec![
+                    Value::Array(lines.into_iter().map(Value::from).collect()),
+                    Value::from(regtype.as_nvim()),
+                ]))
+            }
+            "clipboard_set" => {
+                // regtype は受け取らない。nvim は行指向・矩形指向のとき lines の末尾に
+                // 空行を入れて渡してくるので、CRLF で結合するだけで末尾改行が付く。
+                let lines = parse_clipboard_set(&args).map_err(Value::from)?;
+                let text = crate::text::to_crlf(&lines);
+                let clip = self.clipboard.clone();
+                off_loop(move || clip.set(&text)).await?;
+                Ok(Value::Nil)
+            }
+            _ => Err(Value::from(format!(
+                "host が持つ request は clipboard_get / clipboard_set だけである: `{name}`"
+            ))),
+        }
+    }
+}
+
+/// クリップボード操作を io タスクの外で走らせる。
+///
+/// Win32 のクリップボードはブロッキング API（しかもオーナーの応答待ちで固まる
+/// ことがある）なので、RPC の io タスクの上で直接叩くと nvim との通信ごと止まる。
+async fn off_loop<T: Send + 'static>(
+    op: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, Value> {
+    match tokio::task::spawn_blocking(op).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(Value::from(format!("クリップボード操作に失敗した: {e:#}"))),
+        Err(e) => Err(Value::from(format!(
+            "クリップボード操作のタスクが落ちた: {e}"
+        ))),
+    }
+}
+
+/// `clipboard_set` の args（`[lines]`）を検査する。
+fn parse_clipboard_set(args: &[Value]) -> Result<Vec<String>, String> {
+    let [Value::Array(lines)] = args else {
+        return Err(format!("clipboard_set expects [lines], got {args:?}"));
+    };
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let line = line
+            .as_str()
+            .ok_or_else(|| format!("clipboard_set line is not a string: {line:?}"))?;
+        out.push(line.to_owned());
+    }
+    Ok(out)
 }
 
 /// `Ok(Some)` = 既知の通知、`Ok(None)` = 未知の名前、`Err` = payload が契約と合わない。
@@ -508,10 +588,12 @@ fn string_field(fields: &[(Value, Value)], event: &str, key: &str) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{NvimConfig, NvimServer, parse_notification};
+    use super::{NvimConfig, NvimServer, parse_clipboard_set, parse_notification};
+    use crate::clipboard::Memory;
     use crate::event::HostEvent;
     use rmpv::Value;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn s(text: &str) -> Value {
         Value::from(text)
@@ -641,12 +723,39 @@ mod tests {
         assert_eq!(parse_notification("whatever", &[Value::Nil]), Ok(None));
     }
 
+    #[test]
+    fn clipboard_set_carries_the_lines() {
+        // 行指向のヤンクで nvim が渡してくる形（末尾に空行が入る）。
+        let args = vec![Value::Array(vec![s("a"), s("日本語"), s("")])];
+        assert_eq!(
+            parse_clipboard_set(&args),
+            Ok(vec!["a".to_string(), "日本語".to_string(), String::new()])
+        );
+    }
+
+    #[test]
+    fn clipboard_set_with_a_non_string_line_is_malformed() {
+        let args = vec![Value::Array(vec![s("a"), Value::from(1)])];
+        assert!(parse_clipboard_set(&args).is_err());
+    }
+
+    /// `[lines]` 以外は全て契約違反。regtype を付けてくる呼び出しも通さない。
+    #[test]
+    fn clipboard_set_with_anything_but_the_lines_is_malformed() {
+        assert!(parse_clipboard_set(&[]).is_err());
+        assert!(
+            parse_clipboard_set(&[Value::Array(vec![s("a")]), s("v")]).is_err(),
+            "an extra argument must not be tolerated"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_fails_fast_when_the_bundled_init_lua_is_missing() {
         let cfg = NvimConfig {
             nvim_exe: PathBuf::from("/nonexistent/nvim"),
             runtime_dir: PathBuf::from("/nonexistent/runtime"),
             appname: "anvi-test".to_string(),
+            clipboard: Arc::new(Memory::default()),
         };
         let err = NvimServer::spawn(&cfg)
             .await
@@ -665,6 +774,7 @@ mod tests {
             nvim_exe: dir.join("nvim-does-not-exist"),
             runtime_dir: dir.clone(),
             appname: "anvi-test".to_string(),
+            clipboard: Arc::new(Memory::default()),
         };
         let err = NvimServer::spawn(&cfg)
             .await

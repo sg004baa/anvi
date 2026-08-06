@@ -81,6 +81,38 @@ function M.setup()
     finish()
   end, { bang = true })
 
+  -- クリップボード（issue #11）。同梱 nvim は win32yank を持たないので、`+` / `*` の
+  -- 読み書きは host に代行させる。host は Win32 クリップボードを直に叩く。
+  local function host_channel()
+    if not M.host then
+      error("anvi: host チャンネルが未登録のためクリップボードを使えない")
+    end
+    return M.host
+  end
+
+  -- `clipboard_get` は `[lines, regtype]` を返す。provider の paste が求める形と
+  -- 同じなのでそのまま返す
+  local function paste()
+    return vim.rpcrequest(host_channel(), "clipboard_get")
+  end
+
+  -- regtype は見ない。nvim は行指向・矩形指向のとき lines の末尾に空行を入れて
+  -- 渡してくるので、host 側で結合すれば自然に末尾改行になる
+  local function copy(lines, _regtype)
+    vim.rpcrequest(host_channel(), "clipboard_set", lines)
+  end
+
+  vim.g.clipboard = {
+    name = "anvi",
+    copy = { ["+"] = copy, ["*"] = copy },
+    paste = { ["+"] = paste, ["*"] = paste },
+    -- キャッシュしない。Windows 側で後からコピーされた内容を必ず読むため
+    cache_enabled = 0,
+  }
+  -- `clipboard` オプション（`unnamedplus` など）はここでは設定しない。
+  -- provider を登録するところまでが同梱コアの責務で、オプションはローカル設定の
+  -- 領分（DESIGN §5.4）
+
   -- 見た目やオプションはここに入れない。ローカル設定の領分（DESIGN §5.4）
 end
 

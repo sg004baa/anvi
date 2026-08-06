@@ -272,6 +272,7 @@ UI は host 自身が持つため、同梱する exe は nvim だけ。システ
 - `:w` の乗っ取り
 - `:q` 系の乗っ取り
 - 異常終了時の通知
+- `vim.g.clipboard` provider の登録（→ 5.6）
 
 見た目やキーマップは同梱コアには入れない。ローカル設定側の領分とする。
 
@@ -347,6 +348,70 @@ init.lua は起動時点では host のチャンネル ID を知らない。以�
 3. host が `nvim_exec_lua("require('anvi').set_host(...)", { chan })` を呼んで登録する
 
 以降 init.lua 側は `vim.rpcnotify(host_chan, ...)` で host に通知できる。
+
+### 5.6 クリップボード連携（nvim の `"+` / `"*` レジスタ）
+
+同梱 nvim は Windows ではクリップボード provider を持たない。nvim は win32yank などの
+外部ツールに依存するが、同梱物に exe を増やしたくない。**host 自身を provider の実体にする。**
+
+同梱コアが `vim.g.clipboard` を登録し、`copy` / `paste` の中身は host への
+`vim.rpcrequest` にする（実装は付録 A）。host は Win32 のクリップボードを直に叩く
+（8.2 の fallback で使っているものと同じコード）。
+
+| 方向 | request | 引数 | 戻り値 |
+|---|---|---|---|
+| 貼り付け（`"+p`） | `clipboard_get` | なし | `[lines, regtype]` |
+| ヤンク（`"+y`） | `clipboard_set` | `[lines]` | なし |
+
+`lines` は行配列、`regtype` は `setreg()` の規約（`v` = 文字指向 / `V` = 行指向）。
+**regtype が載るのは取得方向だけである。**
+
+#### コピー方向は regtype を見ない
+
+nvim が `copy` に渡してくる `lines` は、行指向・矩形指向のとき**末尾に空文字列の要素が
+付いている**。つまり CRLF で結合するだけで末尾改行が自然に生える。host が regtype を見て
+`\r\n` を足すと二重になる（実際に一度やって `"日本語\r\n\r\n"` になった）。
+**`clipboard_set` は regtype を受け取らないし、見ない。**
+
+実測（2026-08-06、同梱 nvim）:
+
+| ヤンク | `lines` | `regtype` |
+|---|---|---|
+| `"+yy`（1 行・行指向） | `{"abc", ""}` | `"V"` |
+| `"+yj`（2 行・行指向） | `{"abc", "def", ""}` | `"V"` |
+| `"+yw`（文字指向） | `{"abc"}` | `"v"` |
+| `<C-v>` で 2 行（矩形指向） | `{"ab", "ef", ""}` | `"b"` |
+
+矩形指向の regtype は `"\x16{幅}"` ではなく **`"b"`** で来る。`setreg()` の規約とは違う。
+`"\x16{幅}"` を前提にパースすると矩形ヤンクだけが nvim 側でエラーになる。コピー方向で
+regtype を見ない以上どうでもよい事実だが、見ようとすると必ず踏む。
+
+#### 末尾改行が行指向の印（取得方向）
+
+OS のクリップボードには regtype が載らない。**取得方向だけが判定を持つ。**
+生テキストが改行で終わっていれば `V`、そうでなければ `v` を返す。返す `lines` に
+末尾の空要素は要らない（`{{"L1"}, "V"}` を返せば行指向で貼れることを実測で確認済み）。
+
+**8.4 の「書き戻しでは末尾改行を付けない」とはここだけ意図的に違う。** 8.4 は入力欄との
+往復の話で、末尾改行は入力欄が付けてきた終端子でしかない。こちらは他アプリの
+クリップボードとの往復の話で、末尾改行は行指向を伝える唯一の手がかりである。だから
+コピー方向では nvim が末尾の空要素として付けて渡してくるし、取得方向ではそれを読む。
+
+矩形指向は幅を OS のクリップボードから復元できない。貼り付け時は行指向になる。
+
+#### `cache_enabled = 0`
+
+nvim 側のキャッシュを切る。Windows 側で後からコピーされた内容を必ず読むため。
+
+#### デッドロックの注意
+
+`vim.rpcrequest` は応答が返るまで nvim を待たせる。**host のリクエストハンドラから nvim を
+呼び返してはいけない。** Win32 の呼び出しもブロックしうるので `spawn_blocking` に逃がす。
+
+#### `clipboard` オプションは設定しない
+
+`unnamedplus` などは同梱コアで設定しない。オプションはローカル設定の領分（→ 5.4）。
+同梱コアは provider を用意するところまでを担う。
 
 ---
 
@@ -695,7 +760,7 @@ v1 では非対応。常に入力欄の全内容が対象。
 | nvim RPC | `nvim-rs` |
 | ウィンドウ / キーボード / IME | `winit`（+ `raw-window-handle` で HWND を取り出す） |
 | 描画 / Win32 / UI Automation | `windows`（Direct2D・DirectWrite・D3D11・DXGI・DirectComposition。IMM32 は winit 側） |
-| クリップボード | Win32 直叩き |
+| クリップボード | Win32 直叩き（8.2 の fallback と 5.6 の nvim レジスタ連携の両方で使う） |
 | exe リソース（アイコン / バージョン情報） | `winresource`（build-dependencies） |
 
 ### 11.2 スレッドモデル（重要）
@@ -978,6 +1043,21 @@ function M.setup()
   vim.api.nvim_create_user_command("AnviQuit", function()
     finish()
   end, { bang = true })
+
+  -- OS クリップボード（同梱 nvim は provider を持たないので host に代行させる）
+  local function host_channel()
+    if not M.host then error("anvi: host チャンネルが未登録のためクリップボードを使えない") end
+    return M.host
+  end
+  local function paste() return vim.rpcrequest(host_channel(), "clipboard_get") end
+  -- regtype は使わない。行指向なら lines の末尾に空文字列が入って渡ってくる（→ 5.6）
+  local function copy(lines, _regtype) vim.rpcrequest(host_channel(), "clipboard_set", lines) end
+  vim.g.clipboard = {
+    name = "anvi",
+    copy = { ["+"] = copy, ["*"] = copy },
+    paste = { ["+"] = paste, ["*"] = paste },
+    cache_enabled = 0,
+  }
 
   -- 見た目やオプションはここに入れない。ローカル設定の領分（→ 5.4）
 end

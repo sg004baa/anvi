@@ -13,7 +13,9 @@
 //! ところまで実装して出力で見せる。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use anvi_core::clipboard::Memory;
 use anvi_core::{Applied, HostEvent, NvimConfig, NvimServer, Session, text};
 
 #[tokio::main]
@@ -38,6 +40,8 @@ async fn main() -> anyhow::Result<()> {
         nvim_exe: PathBuf::from(nvim_exe),
         runtime_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime"),
         appname: "anvi".to_owned(),
+        // このサンプルは Win32 を持たない環境でも動かすので、プロセス内で完結させる。
+        clipboard: Arc::new(Memory::default()),
     };
 
     // UI クライアントとしてはアタッチしない（このサンプルは状態契約だけを見る）。

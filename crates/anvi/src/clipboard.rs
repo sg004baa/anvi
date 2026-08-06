@@ -2,6 +2,8 @@
 //!
 //! `arboard` ではなく Win32 直叩きにしている。退避 / 復元とコピー完了待ちを
 //! 自分で握る必要があるため。
+//!
+//! nvim の `+` / `*` レジスタの実体 ([`WinClipboard`]) もここが担う。
 
 use std::time::{Duration, Instant};
 
@@ -182,5 +184,21 @@ pub fn restore(snapshot: &Snapshot) -> Result<()> {
             // SAFETY: クリップボードは開いている。
             unsafe { EmptyClipboard() }.context("退避内容の復元 (空化) に失敗")
         }
+    }
+}
+
+/// nvim の `+` / `*` レジスタを Win32 クリップボードへ繋ぐ実体 (DESIGN §5.6)。
+#[derive(Debug)]
+pub struct WinClipboard;
+
+impl anvi_core::Clipboard for WinClipboard {
+    fn get(&self) -> Result<String> {
+        // CF_UNICODETEXT が無い = 貼るテキストが無い。空文字列がその正直な答えで、
+        // 失敗の握り潰しではない。
+        Ok(get_text()?.unwrap_or_default())
+    }
+
+    fn set(&self, text: &str) -> Result<()> {
+        set_text(text)
     }
 }
