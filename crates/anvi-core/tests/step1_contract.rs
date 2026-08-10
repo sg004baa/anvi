@@ -250,6 +250,36 @@ async fn wq_abbrev_writes_then_ends() {
     server.shutdown().await.expect("shutdown");
 }
 
+/// §12-4: `:wq!` も乗っ取る。`!` の入力時点で `wq` の abbrev が展開されて
+/// `AnviWriteQuit!` になる（コマンド側の bang = true が受ける）。
+#[tokio::test]
+async fn wq_bang_abbrev_writes_then_ends() {
+    let (mut server, mut events, client) = start("anvi-test-wq-bang").await;
+    let original = owned(&["原文"]);
+
+    let mut session = Session::default();
+    assert!(session.begin_capture());
+    start_session(&server, &original).await;
+    session.begin_edit(original.clone());
+
+    feed(&client, "ccrewritten<Esc>:wq!<CR>").await;
+
+    feed_session(&mut session, expect_event(&mut events).await);
+    assert_eq!(expect_event(&mut events).await, HostEvent::SessionEnd);
+    assert_eq!(session.on_end(), Applied::WriteBack(owned(&["rewritten"])));
+
+    // 乗っ取れているなら nvim は生きている
+    assert!(
+        !client
+            .get_api_info()
+            .await
+            .expect("nvim_get_api_info")
+            .is_empty()
+    );
+    expect_quiet(&mut events).await;
+    server.shutdown().await.expect("shutdown");
+}
+
 /// 内容が変わらないまま `ZZ` した場合は書き戻さない（DESIGN §9.4）。
 #[tokio::test]
 async fn unchanged_content_is_not_written_back() {

@@ -95,13 +95,18 @@ pub struct Grid {
 
 impl Grid {
     /// 全セルが空白の新しいグリッド。
+    ///
+    /// セル数（`cols * rows`）が `usize` を溢れる寸法は `None`。壊れた
+    /// `grid_resize` をそのまま確保に回して panic するより、呼び側でエラーに
+    /// して失敗を報告させる（silent clamp はしない）。
     #[must_use]
-    pub fn new(cols: usize, rows: usize) -> Self {
-        Self {
+    pub fn new(cols: usize, rows: usize) -> Option<Self> {
+        let len = cols.checked_mul(rows)?;
+        Some(Self {
             cols,
             rows,
-            cells: vec![Cell::BLANK; cols * rows],
-        }
+            cells: vec![Cell::BLANK; len],
+        })
     }
 
     #[must_use]

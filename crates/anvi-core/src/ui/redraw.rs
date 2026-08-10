@@ -71,7 +71,8 @@ fn apply_one(
             }
             let cols = as_usize(arg(args, 1, event)?, "grid_resize width")?;
             let rows = as_usize(arg(args, 2, event)?, "grid_resize height")?;
-            state.grid = Grid::new(cols, rows);
+            state.grid = Grid::new(cols, rows)
+                .ok_or_else(|| anyhow!("grid_resize: セル数 {cols}x{rows} が usize を溢れる"))?;
             outcome.resized = true;
         }
         "grid_clear" => {
