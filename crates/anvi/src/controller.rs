@@ -25,7 +25,12 @@ use crate::uia::Uia;
 pub enum Cmd {
     Hotkey,
     Exit,
-    Host(HostEvent),
+    /// nvim からの通知。`generation` は送信元ペアの世代。キュー滞留中に
+    /// ペアが再起動され得るので、受信側でも現世代と照合して旧ペア分を捨てる。
+    Host {
+        generation: u64,
+        event: HostEvent,
+    },
     /// GUI からのキー入力（既に nvim 記法）。
     Input(String),
     /// ウィンドウのサイズが変わった。
@@ -56,6 +61,8 @@ pub struct Boot {
     pub proxy: EventLoopProxy<UserEvent>,
     /// 意図的シャットダウン中の印。リカバリの誤発火を抑止する（DESIGN 6.3）。
     pub shutting_down: Arc<AtomicBool>,
+    /// 現行ペアの世代。main が作り、GUI 側の redraw 判定と共有する。
+    pub generation: Arc<AtomicU64>,
 }
 
 /// nvim を起こして UI としても繋ぐ。
@@ -96,6 +103,7 @@ pub fn start(boot: Boot) -> anyhow::Result<std::thread::JoinHandle<()>> {
         pair,
         proxy,
         shutting_down,
+        generation,
     } = boot;
     let Pair {
         nvim,
@@ -103,9 +111,15 @@ pub fn start(boot: Boot) -> anyhow::Result<std::thread::JoinHandle<()>> {
         redraw_rx,
     } = pair;
 
-    let generation = Arc::new(AtomicU64::new(0));
-    forward(&rt, host_rx, tx.clone(), 0, Arc::clone(&generation));
-    pump_redraw(&rt, redraw_rx, proxy.clone(), 0, Arc::clone(&generation));
+    let initial = generation.load(Ordering::SeqCst);
+    forward(&rt, host_rx, tx.clone(), initial, Arc::clone(&generation));
+    pump_redraw(
+        &rt,
+        redraw_rx,
+        proxy.clone(),
+        initial,
+        Arc::clone(&generation),
+    );
 
     let mut controller = Controller {
         bundle,
@@ -145,7 +159,7 @@ impl Controller {
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Cmd::Hotkey => self.on_hotkey(),
-                Cmd::Host(event) => self.on_host(event),
+                Cmd::Host { generation, event } => self.on_host(generation, event),
                 Cmd::Input(keys) => self.on_input(&keys),
                 Cmd::Resize { cols, rows } => self.on_resize(cols, rows),
                 Cmd::CloseRequested => self.on_close_requested(),
@@ -229,7 +243,18 @@ impl Controller {
     }
 
     /// DESIGN 付録 B 通知ハンドラ。
-    fn on_host(&mut self, event: HostEvent) {
+    fn on_host(&mut self, generation: u64, event: HostEvent) {
+        // enqueue 前のチェック（`forward`）を通過した後に `restart_pair` が世代を
+        // 進めていると、旧ペアのイベントがここまで届く。旧 `SessionEnd` が新しい
+        // セッションを終了・書き戻しするとデータ破壊なので、ここで捨てる。
+        if generation != self.generation.load(Ordering::SeqCst) {
+            tracing::debug!(
+                ?event,
+                generation,
+                "host event from a superseded pair dropped"
+            );
+            return;
+        }
         match event {
             // 保持するだけ。書き戻しはセッション終了時（DESIGN 4.4）。
             HostEvent::SessionWrite(lines) => self.session.on_write(lines),
@@ -368,7 +393,9 @@ impl Controller {
 
 /// `NvimServer` のイベント列を `Cmd::Host` へ流す（tokio ランタイム上のタスク）。
 ///
-/// 世代が進んでいたら旧ペアのイベントなので捨てて畳む。
+/// 世代が進んでいたら旧ペアのタスクなので自終する。ただしこのチェックは enqueue 前に
+/// しか走らず、通過後に世代が進むレースは防げない。正はメッセージに載せた世代を
+/// 受信側（[`Controller::on_host`]）で照合すること。ここでの自終は掃除にすぎない。
 fn forward(
     rt: &Handle,
     mut host_rx: UnboundedReceiver<HostEvent>,
@@ -382,7 +409,7 @@ fn forward(
                 tracing::debug!(?event, generation, "event from a superseded pair dropped");
                 return;
             }
-            if tx.send(Cmd::Host(event)).is_err() {
+            if tx.send(Cmd::Host { generation, event }).is_err() {
                 return;
             }
         }
@@ -392,7 +419,8 @@ fn forward(
 /// `redraw` バッチを GUI スレッドへ流す（tokio ランタイム上のタスク）。
 ///
 /// パースはしない。UI 状態への適用は winit のループの中でやる（`redraw` は毎打鍵
-/// 飛んでくるので、RPC の io タスクを重くしない）。世代の扱いは [`forward`] と同じ。
+/// 飛んでくるので、RPC の io タスクを重くしない）。世代の扱いは [`forward`] と同じ:
+/// 自終は enqueue 前チェック、正の判定はメッセージの世代を GUI 側受信点で照合する。
 fn pump_redraw(
     rt: &Handle,
     mut redraw_rx: UnboundedReceiver<Vec<rmpv::Value>>,
@@ -406,7 +434,10 @@ fn pump_redraw(
                 tracing::debug!(generation, "redraw from a superseded pair dropped");
                 return;
             }
-            if proxy.send_event(UserEvent::Redraw(batch)).is_err() {
+            if proxy
+                .send_event(UserEvent::Redraw { generation, batch })
+                .is_err()
+            {
                 tracing::debug!("the gui event loop is gone; redraw pump stopped");
                 return;
             }

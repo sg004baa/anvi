@@ -6,6 +6,8 @@
 //!
 //! 値は「現在の exe の絶対パス」。別の場所へ置き直したら、そのビルドで入れ直すこと。
 
+use std::os::windows::ffi::OsStrExt as _;
+
 use anyhow::{Context as _, Result, bail};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
@@ -80,11 +82,13 @@ pub fn set(enabled: bool) -> Result<()> {
     }
 
     let exe = std::env::current_exe().context("current_exe() failed")?;
-    let exe = exe
-        .to_str()
-        .with_context(|| format!("the executable path is not UTF-8: {}", exe.display()))?;
+    // レジストリは UTF-16 なので OsStr から直接エンコードする（非 UTF-8 パスでも登録できる）。
     // 空白入りのパスでも 1 引数として扱われるよう引用する。インストーラも同じ形で書く。
-    let value = wide(&format!("\"{exe}\""));
+    let mut value: Vec<u16> = Vec::with_capacity(exe.as_os_str().len() + 3);
+    value.push(u16::from(b'"'));
+    value.extend(exe.as_os_str().encode_wide());
+    value.push(u16::from(b'"'));
+    value.push(0);
     let bytes = std::mem::size_of_val(value.as_slice());
     // SAFETY: name と value は NUL 終端の生存スライス。バイト列は value そのもので、
     // 終端の NUL を含む（REG_SZ はそれを要求する）。

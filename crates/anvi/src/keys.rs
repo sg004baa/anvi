@@ -98,15 +98,49 @@ fn key_event(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 
 fn send(inputs: &[INPUT]) -> Result<()> {
     // SAFETY: `inputs` は有効な INPUT の連続領域で、cbsize は実際の要素サイズと一致する。
-    let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
-    if sent as usize != inputs.len() {
-        // UIPI（昇格プロセスが前面のとき）などで注入がブロックされた場合ここに来る。
-        return Err(windows::core::Error::from_thread()).with_context(|| {
-            format!(
-                "SendInput が {} 件中 {sent} 件しか受け付けなかった",
-                inputs.len()
-            )
-        });
+    let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) } as usize;
+    if sent == inputs.len() {
+        return Ok(());
     }
-    Ok(())
+    // UIPI（昇格プロセスが前面のとき）などで注入がブロックされた場合ここに来る。
+    let err = windows::core::Error::from_thread();
+
+    // 受理済みプレフィックスに key-down のまま up が届いていない VK が残ると、
+    // Ctrl / Alt 等が OS 側で押しっぱなしにラッチする。補償の key-up を注入してから
+    // 失敗を返す。補償の結果もエラー文言に含める。
+    let mut held: Vec<VIRTUAL_KEY> = Vec::new();
+    for input in &inputs[..sent] {
+        // SAFETY: 本モジュールの INPUT はすべて key_event() が作る INPUT_KEYBOARD。
+        let ki = unsafe { input.Anonymous.ki };
+        if ki.dwFlags.0 & KEYEVENTF_KEYUP.0 != 0 {
+            held.retain(|vk| *vk != ki.wVk);
+        } else if !held.contains(&ki.wVk) {
+            held.push(ki.wVk);
+        }
+    }
+    let mut note = String::new();
+    if !held.is_empty() {
+        // 押した順の逆で離す。
+        let ups: Vec<INPUT> = held
+            .iter()
+            .rev()
+            .map(|vk| key_event(*vk, KEYEVENTF_KEYUP))
+            .collect();
+        // SAFETY: `ups` は有効な INPUT の連続領域で、cbsize は実際の要素サイズと一致する。
+        let up_sent = unsafe { SendInput(&ups, size_of::<INPUT>() as i32) } as usize;
+        note = if up_sent == ups.len() {
+            format!("（押下ラッチ防止の key-up {} 件を補償注入した）", ups.len())
+        } else {
+            format!(
+                "（補償の key-up も {} 件中 {up_sent} 件しか受け付けられず、修飾キーが押下ラッチしている可能性がある）",
+                ups.len()
+            )
+        };
+    }
+    Err(err).with_context(|| {
+        format!(
+            "SendInput が {} 件中 {sent} 件しか受け付けなかった{note}",
+            inputs.len()
+        )
+    })
 }

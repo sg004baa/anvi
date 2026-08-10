@@ -128,10 +128,21 @@ function M.enforce_contract()
     vim.cmd(([[cnoreabbrev <expr> %s (getcmdtype()==#':' && getcmdline()==#%q) ? %q : %q]]):format(lhs, lhs, rhs, lhs))
   end
 
+  -- bang 付き（`:wq!` など）は `!` を打った瞬間に bang なしの abbr が展開されて
+  -- 「AnviWriteQuit!」の形になる（コマンド側の bang = true が受ける）。
+  -- bang 付き lhs も定義しておくのは、展開規則が変わっても素通りさせないための保険
   abbr("q", "AnviQuit")
   abbr("q!", "AnviQuit")
+  abbr("qa", "AnviQuit")
+  abbr("qa!", "AnviQuit")
   abbr("wq", "AnviWriteQuit")
+  abbr("wq!", "AnviWriteQuit")
+  abbr("wqa", "AnviWriteQuit")
+  abbr("wqa!", "AnviWriteQuit")
   abbr("x", "AnviWriteQuit")
+  abbr("x!", "AnviWriteQuit")
+  abbr("xa", "AnviWriteQuit")
+  abbr("xa!", "AnviWriteQuit")
 
   -- 3. 安全網: 乗っ取りを抜けて本当に終了しようとした場合
   --    clear = true で二重登録を防ぐ（再宣言されうるため）

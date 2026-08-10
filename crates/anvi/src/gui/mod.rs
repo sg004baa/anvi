@@ -14,8 +14,9 @@ pub mod keys;
 pub mod render;
 pub mod window;
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use anvi_core::ui::input::{Mods, encode_key, encode_text};
 use anvi_core::ui::{UiState, redraw};
@@ -62,8 +63,13 @@ impl Preedit {
 /// winit のユーザーイベント。controller / トレイ / ホットキー / RPC 転送から届く。
 #[derive(Debug)]
 pub enum UserEvent {
-    /// nvim からの `redraw` バッチ（params をそのまま）。
-    Redraw(Vec<rmpv::Value>),
+    /// nvim からの `redraw` バッチ（params をそのまま）。`generation` は送信元
+    /// ペアの世代。キュー滞留中にペアが再起動され得るので、受信側でも現世代と
+    /// 照合して旧ペア分を捨てる（旧 redraw が新セッションの画面を汚さないように）。
+    Redraw {
+        generation: u64,
+        batch: Vec<rmpv::Value>,
+    },
     Hotkey,
     /// トレイの自動起動チェックが切り替わった。実際のレジストリ操作は
     /// メニュー項目を持っている [`Tray`] 側で行う（ハンドラは `Send` 制約で
@@ -112,6 +118,9 @@ pub struct GuiBoot {
     pub tx: Sender<Cmd>,
     pub tray: Tray,
     pub hotkeys: Hotkeys,
+    /// 現行ペアの世代。controller の `restart_pair` が進める。旧ペアの `Redraw` を
+    /// 捨てる判定に使う。
+    pub generation: Arc<AtomicU64>,
 }
 
 /// main スレッドを占有する。ループが終わったら戻る。
@@ -129,6 +138,7 @@ pub fn run(event_loop: EventLoop<UserEvent>, boot: GuiBoot) -> anyhow::Result<()
         font: FontSpec::default(),
         ime: ImeState::default(),
         mods: Mods::default(),
+        generation: boot.generation,
         grid: DEFAULT_GRID,
         draw_failures: 0,
         fatal: None,
@@ -165,6 +175,8 @@ struct App {
     mods: Mods,
     /// 直近に nvim へ伝えたグリッド。同じ値を送り返さないため。
     grid: (u16, u16),
+    /// 現行ペアの世代。[`UserEvent::Redraw`] の世代照合に使う。
+    generation: Arc<AtomicU64>,
     draw_failures: u32,
     /// ループを畳む原因になった致命的エラー。[`run`] の戻り値になる。
     fatal: Option<anyhow::Error>,
@@ -184,7 +196,14 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Redraw(batch) => self.on_redraw(&batch),
+            UserEvent::Redraw { generation, batch } => {
+                // 転送タスク側のチェックは enqueue 前にしか走らない。ここが正の判定。
+                if generation != self.generation.load(Ordering::SeqCst) {
+                    tracing::debug!(generation, "redraw from a superseded pair dropped");
+                    return;
+                }
+                self.on_redraw(&batch);
+            }
             UserEvent::Show { target } => self.on_show(target),
             UserEvent::Hide => match self.surface.as_ref() {
                 Some(surface) => window::hide(&surface.window),

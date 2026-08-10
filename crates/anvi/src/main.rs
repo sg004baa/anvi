@@ -32,7 +32,7 @@ mod uia;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context as _, anyhow};
 use tracing_subscriber::EnvFilter;
@@ -72,6 +72,9 @@ fn main() -> anyhow::Result<()> {
     let uia = uia::Uia::start().context("failed to start the UI Automation thread")?;
 
     let shutting_down = Arc::new(AtomicBool::new(false));
+    // ペアの世代。controller が `restart_pair` で進め、転送タスクと GUI の両受信点が
+    // 旧ペアのメッセージを捨てる判定に使う。
+    let generation = Arc::new(AtomicU64::new(0));
     let controller = controller::start(controller::Boot {
         bundle,
         rt: rt.handle().clone(),
@@ -81,6 +84,7 @@ fn main() -> anyhow::Result<()> {
         pair,
         proxy: proxy.clone(),
         shutting_down: Arc::clone(&shutting_down),
+        generation: Arc::clone(&generation),
     })?;
 
     let tray = tray::Tray::new(gui::ProxyHandle::new(proxy.clone()))?;
@@ -92,6 +96,7 @@ fn main() -> anyhow::Result<()> {
         tx: tx.clone(),
         tray,
         hotkeys,
+        generation,
     };
     let result = gui::run(event_loop, boot);
 
