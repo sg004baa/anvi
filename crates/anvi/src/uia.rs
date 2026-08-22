@@ -20,12 +20,10 @@ use windows::Win32::System::Ole::{
     SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-    IUIAutomationValuePattern, UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_TextPatternId,
-    UIA_ValuePatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor};
-use windows::core::BSTR;
 
 use crate::clipboard;
 use crate::keys;
@@ -39,12 +37,6 @@ const COPY_TIMEOUT: Duration = Duration::from_millis(400);
 /// （読み取りではシーケンス番号が変わらない）ため、ここだけは固定待ちになる。
 const PASTE_SETTLE: Duration = Duration::from_millis(150);
 
-/// Chromium 系（Chrome / Edge / Electron）の `FrameworkId`。
-const CHROMIUM_FRAMEWORK: &str = "Chrome";
-
-/// `IUIAutomationTextRange::GetText` の長さ制限なし。
-const TEXT_UNLIMITED: i32 = -1;
-
 /// 取得できたテキストと、フォーカスを戻すべきウィンドウ。
 #[derive(Debug, Clone)]
 pub struct Captured {
@@ -52,29 +44,10 @@ pub struct Captured {
     pub hwnd: isize,
 }
 
-/// 書き戻しの経路 (§9.1)。取得経路がそのまま書き戻し経路を決める。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Route {
-    /// `ValuePattern` (`IsReadOnly=false`) → `SetValue` で直接書き込む。
-    Value,
-    /// `TextPattern` で取得（読み取り専用）→ クリップボード貼り付け。
-    TextPattern,
-    /// `Ctrl+A` / `Ctrl+C` で取得 → クリップボード貼り付け。
-    Clipboard,
-}
-
-impl Route {
-    /// `SetValue` が使えない経路は貼り付けで書き戻す (§9.1)。
-    fn is_paste(self) -> bool {
-        !matches!(self, Self::Value)
-    }
-}
-
 /// UIA スレッド内にだけ存在する書き戻し対象。COM ポインタを含むため外に出さない。
 struct Target {
-    route: Route,
     element: IUIAutomationElement,
-    /// 取得時の RuntimeId。取得できない要素もあるため `Option`。
+    /// 取得時の RuntimeId。取得できない要素は COM identity で照合する。
     runtime_id: Option<Vec<i32>>,
     hwnd: isize,
 }
@@ -209,7 +182,7 @@ fn thread_main(jobs: &Receiver<Job>, replies: &Sender<Reply>, ready: &Sender<Res
     }
 }
 
-/// §8.1 の優先順位で取得し、対象をスレッド内に保持する。
+/// 編集可能な対象を確認し、クリップボードから取得してスレッド内に保持する。
 fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Captured>> {
     // 前セッションの対象は必ず捨てる。取得に失敗したあとで古い対象に書き戻すのは事故。
     *slot = None;
@@ -226,88 +199,33 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
         return Ok(None);
     };
 
-    let framework = framework_id(&element);
-
-    // Chromium 系（Chrome / Edge / Electron）は UIA のテキストを信用しない (§8.1)。
-    // 空段落が落ちるので、この相手だけはクリップボードで取得する。
-    if framework.as_deref() == Some(CHROMIUM_FRAMEWORK) {
-        if !is_edit_like(&element) {
-            tracing::debug!("編集系の要素と確認できない: キー注入せず編集対象なしとして扱う");
-            return Ok(None);
-        }
-        let text = capture_via_clipboard()
-            .context("Chromium 系の入力欄からクリップボード経由で取得できなかった")?;
-        return Ok(Some(retain(
-            slot,
-            element,
-            Route::Clipboard,
-            hwnd,
-            framework,
-            &text,
-        )));
-    }
-
-    // 1. ValuePattern (§8.1)
-    if let Some(text) = value_pattern_text(&element) {
-        return Ok(Some(retain(
-            slot,
-            element,
-            Route::Value,
-            hwnd,
-            framework,
-            &text,
-        )));
-    }
-
-    // 2. TextPattern。読み取り専用なので書き戻しは貼り付けになる (§9.1)
-    if let Some(text) = text_pattern_text(&element) {
-        return Ok(Some(retain(
-            slot,
-            element,
-            Route::TextPattern,
-            hwnd,
-            framework,
-            &text,
-        )));
-    }
-
-    // 3. クリップボード fallback。編集系と確認できない相手にキーを撃ち込まない (§8.3)
+    // 編集系と確認できない相手には Ctrl+A / Ctrl+C を注入しない (§8.3)。
     if !is_edit_like(&element) {
         tracing::debug!("編集系の要素と確認できない: キー注入せず編集対象なしとして扱う");
         return Ok(None);
     }
-    let text = capture_via_clipboard()?;
-    Ok(Some(retain(
-        slot,
-        element,
-        Route::Clipboard,
-        hwnd,
-        framework,
-        &text,
-    )))
+
+    let text = capture_via_clipboard()
+        .context("編集対象からクリップボード経由でテキストを取得できなかった")?;
+    Ok(Some(retain(slot, element, hwnd, &text)))
 }
 
 fn retain(
     slot: &mut Option<Target>,
     element: IUIAutomationElement,
-    route: Route,
     hwnd: isize,
-    framework: Option<String>,
     text: &str,
 ) -> Captured {
     let lines = to_lines(text);
     let runtime_id = runtime_id(&element);
-    // どの経路を通ったかは不具合報告の一次情報になるので、セッション毎に 1 行残す。
     tracing::info!(
-        ?route,
-        framework = framework.as_deref().unwrap_or("?"),
+        route = "Clipboard",
         lines = lines.len(),
         chars = text.chars().count(),
         hwnd = format_args!("{hwnd:#x}"),
         "captured"
     );
     *slot = Some(Target {
-        route,
         element,
         runtime_id,
         hwnd,
@@ -315,67 +233,38 @@ fn retain(
     Captured { lines, hwnd }
 }
 
-/// 書き戻す (§9.1)。
+/// 取得時と同じ編集対象へクリップボード貼り付けで書き戻す (§9.1)。
 fn write_back(uia: &IUIAutomation, target: Option<&Target>, lines: &[String]) -> Result<()> {
     let target = target.context("書き戻し対象が保持されていない")?;
+    ensure_same_edit_target(uia, target)?;
     // 結合は常に CRLF（`CF_UNICODETEXT` の慣習。旧来の EDIT コントロールもこれを要求する）。
-    let text = to_crlf(lines);
-
-    if target.route.is_paste() {
-        return paste_back(target, &text);
-    }
-
-    let element = match focused_if_same(uia, target) {
-        Some(fresh) => fresh,
-        None => {
-            // RuntimeId が一致しない / 取れない場合は、保持していた要素で試す (§9.1)。
-            tracing::debug!("フォーカス要素が取得時と一致しない: 保持していた要素で SetValue する");
-            target.element.clone()
-        }
-    };
-
-    match set_value(&element, &text) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            tracing::warn!("SetValue が失敗: クリップボード貼り付けに落とす ({e:#})");
-            paste_back(target, &text).with_context(|| {
-                format!("SetValue が失敗 ({e:#}) し、クリップボード貼り付けも失敗した")
-            })
-        }
-    }
+    paste_back(target, &to_crlf(lines))
 }
 
-/// フォーカス中の要素が取得時と同一 (RuntimeId 一致) ならそれを返す。
-fn focused_if_same(uia: &IUIAutomation, target: &Target) -> Option<IUIAutomationElement> {
-    let want = target.runtime_id.as_deref()?;
+/// フォーカス中の要素が取得時と同じ編集対象であることを確認する。
+fn ensure_same_edit_target(uia: &IUIAutomation, target: &Target) -> Result<()> {
     // SAFETY: uia はこのスレッドで生成した有効な COM ポインタ。
-    let fresh = unsafe { uia.GetFocusedElement() }.ok()?;
-    (runtime_id(&fresh)?.as_slice() == want).then_some(fresh)
-}
-
-fn value_pattern_text(element: &IUIAutomationElement) -> Option<String> {
-    // SAFETY: element は生きた UIA 要素。パターン未対応なら Err が返る。
-    let pattern =
-        unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
-            .ok()?;
-    // SAFETY: pattern は直前に取得した有効な COM ポインタ。
-    if unsafe { pattern.CurrentIsReadOnly() }.ok()?.as_bool() {
-        // 読み取り専用の ValuePattern は書き戻しに使えないので、経路として採らない (§9.1)。
-        return None;
+    let focused = unsafe { uia.GetFocusedElement() }
+        .context("書き戻し先のフォーカス要素を取得できなかった")?;
+    if !is_edit_like(&focused) {
+        bail!("書き戻し先が編集可能な要素ではないため、キー注入を中止した");
     }
-    // SAFETY: 同上。
-    Some(unsafe { pattern.CurrentValue() }.ok()?.to_string())
-}
 
-fn text_pattern_text(element: &IUIAutomationElement) -> Option<String> {
-    // SAFETY: element は生きた UIA 要素。パターン未対応なら Err が返る。
-    let pattern =
-        unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
-            .ok()?;
-    // SAFETY: pattern は直前に取得した有効な COM ポインタ。
-    let range = unsafe { pattern.DocumentRange() }.ok()?;
-    // SAFETY: range は直前に取得した有効な COM ポインタ。-1 は長さ無制限。
-    Some(unsafe { range.GetText(TEXT_UNLIMITED) }.ok()?.to_string())
+    let same = if let Some(want) = target.runtime_id.as_deref() {
+        // RuntimeId は COM wrapper ではなく論理要素の identity。provider が同じ論理要素の
+        // wrapper を作り直しても同じ ID を返すため、正規な再取得はここで一致する。
+        runtime_id(&focused).is_some_and(|actual| actual == want)
+    } else {
+        // RuntimeId を公開しない provider では UIA 自身の element identity 比較を使う。
+        // SAFETY: focused と target.element は同じ MTA 上の有効な UIA 要素。
+        unsafe { uia.CompareElements(&focused, &target.element) }
+            .context("書き戻し先の UIA 要素を照合できなかった")?
+            .as_bool()
+    };
+    if !same {
+        bail!("書き戻し先が取得時の編集対象と一致しないため、キー注入を中止した");
+    }
+    Ok(())
 }
 
 /// ControlType が Edit / Document で、かつキーボードフォーカス可能か (§8.3)。
@@ -419,22 +308,6 @@ fn copy_selection(baseline: u32) -> Result<String> {
         return Ok(String::new());
     }
     clipboard::get_text()?.context("Ctrl+C 後のクリップボードに CF_UNICODETEXT が無かった")
-}
-
-fn set_value(element: &IUIAutomationElement, text: &str) -> Result<()> {
-    // SAFETY: element は生きた UIA 要素。stale なら Err が返る。
-    let pattern =
-        unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
-            .context("ValuePattern を取得できなかった")?;
-    // SAFETY: pattern は直前に取得した有効な COM ポインタ。
-    let read_only = unsafe { pattern.CurrentIsReadOnly() }
-        .context("IsReadOnly を取得できなかった")?
-        .as_bool();
-    if read_only {
-        bail!("対象が読み取り専用になっている");
-    }
-    // SAFETY: 同上。BSTR は呼び出しの間だけ有効であればよい。
-    unsafe { pattern.SetValue(&BSTR::from(text)) }.context("SetValue に失敗")
 }
 
 /// クリップボード貼り付けによる書き戻し (§9.3)。
@@ -508,16 +381,6 @@ fn runtime_id(element: &IUIAutomationElement) -> Option<Vec<i32>> {
     let _ = unsafe { SafeArrayDestroy(array) };
     // 空の RuntimeId は同一性判定に使えない（別の空同士が一致してしまう）。
     ids.filter(|ids| !ids.is_empty())
-}
-
-/// 要素の `FrameworkId`（`"Win32"` / `"WPF"` / `"Chrome"` など）。
-/// 取れない相手もあるので `Option`。
-fn framework_id(element: &IUIAutomationElement) -> Option<String> {
-    // SAFETY: element は生きた UIA 要素。BSTR の所有権は呼び出し側にあり、
-    // `to_string` のあと Drop で解放される。
-    let id = unsafe { element.CurrentFrameworkId() }.ok()?;
-    let id = id.to_string();
-    (!id.is_empty()).then_some(id)
 }
 
 /// # Safety

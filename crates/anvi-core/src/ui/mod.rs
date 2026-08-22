@@ -359,15 +359,15 @@ impl ModeState {
         self.modes.get(self.current)
     }
 
-    /// このモードで文字を打ち込めるか。IME の有効・無効はこれで切り替える。
+    /// host が Windows IME を有効にするモードか。
     ///
     /// nvim が送るモード名（`mode_change` の第 1 引数）で判定する。挿入・置換・
-    /// コマンドライン・端末・選択の各モードだけが文字入力を受け付ける。
+    /// 端末・選択モードだけで有効にし、ノーマル・コマンドラインモードでは無効にする。
     #[must_use]
     pub fn accepts_text_input(&self) -> bool {
         matches!(
             self.name.split('_').next().unwrap_or_default(),
-            "insert" | "replace" | "cmdline" | "terminal" | "select"
+            "insert" | "replace" | "terminal" | "select"
         )
     }
 }

@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_change_drives_accepts_text_input() {
+    fn mode_change_enables_ime_for_insert_but_not_normal_or_cmdline() {
         let mut state = UiState::default();
         let outcome = apply(
             &mut state,
@@ -743,7 +743,10 @@ mod tests {
         )
         .expect("apply");
         assert!(outcome.mode_changed);
-        assert!(state.mode.accepts_text_input());
+        assert!(
+            state.mode.accepts_text_input(),
+            "insert mode must enable IME"
+        );
 
         apply(
             &mut state,
@@ -753,9 +756,12 @@ mod tests {
             )],
         )
         .expect("apply");
-        assert!(!state.mode.accepts_text_input());
+        assert!(
+            !state.mode.accepts_text_input(),
+            "normal mode must disable IME"
+        );
 
-        // cmdline_normal のような合成名も先頭で判定する。
+        // cmdline_normal のような合成名でもコマンドラインモードは IME を無効にする。
         apply(
             &mut state,
             &[event(
@@ -764,7 +770,10 @@ mod tests {
             )],
         )
         .expect("apply");
-        assert!(state.mode.accepts_text_input());
+        assert!(
+            !state.mode.accepts_text_input(),
+            "cmdline mode must disable IME"
+        );
     }
 
     #[test]
