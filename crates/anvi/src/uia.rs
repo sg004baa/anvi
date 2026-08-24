@@ -20,10 +20,12 @@ use windows::Win32::System::Ole::{
     SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, UIA_DocumentControlTypeId,
-    UIA_EditControlTypeId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern,
+    UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor};
+use windows::core::BSTR;
 
 use crate::clipboard;
 use crate::keys;
@@ -199,9 +201,10 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
         return Ok(None);
     };
 
-    // 編集系と確認できない相手には Ctrl+A / Ctrl+C を注入しない (§8.3)。
-    if !is_edit_like(&element) {
-        tracing::debug!("編集系の要素と確認できない: キー注入せず編集対象なしとして扱う");
+    // 編集対象として適格と確認できない相手には Ctrl+A / Ctrl+C を注入しない (§8.3)。
+    let capabilities = eligibility_capabilities(&element);
+    if !is_eligible_target(capabilities) {
+        log_eligibility_rejection(&element, capabilities);
         return Ok(None);
     }
 
@@ -246,7 +249,8 @@ fn ensure_same_edit_target(uia: &IUIAutomation, target: &Target) -> Result<()> {
     // SAFETY: uia はこのスレッドで生成した有効な COM ポインタ。
     let focused = unsafe { uia.GetFocusedElement() }
         .context("書き戻し先のフォーカス要素を取得できなかった")?;
-    if !is_edit_like(&focused) {
+    let capabilities = eligibility_capabilities(&focused);
+    if !is_eligible_target(capabilities) {
         bail!("書き戻し先が編集可能な要素ではないため、キー注入を中止した");
     }
 
@@ -267,17 +271,90 @@ fn ensure_same_edit_target(uia: &IUIAutomation, target: &Target) -> Result<()> {
     Ok(())
 }
 
-/// ControlType が Edit / Document で、かつキーボードフォーカス可能か (§8.3)。
-fn is_edit_like(element: &IUIAutomationElement) -> bool {
-    // SAFETY: element は生きた UIA 要素。
-    let Ok(control_type) = (unsafe { element.CurrentControlType() }) else {
-        return false;
-    };
-    if control_type != UIA_EditControlTypeId && control_type != UIA_DocumentControlTypeId {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EligibilityCapabilities {
+    control_type: Option<i32>,
+    keyboard_focusable: Option<bool>,
+    value_pattern: bool,
+    value_writable: bool,
+}
+
+fn eligibility_capabilities(element: &IUIAutomationElement) -> EligibilityCapabilities {
+    let (value_pattern, value_writable) = value_pattern_status(element);
+    EligibilityCapabilities {
+        control_type: control_type(element),
+        keyboard_focusable: keyboard_focusable(element),
+        value_pattern,
+        value_writable,
+    }
+}
+
+fn is_eligible_target(capabilities: EligibilityCapabilities) -> bool {
+    if capabilities.keyboard_focusable != Some(true) {
         return false;
     }
-    // SAFETY: 同上。
-    unsafe { element.CurrentIsKeyboardFocusable() }.is_ok_and(|focusable| focusable.as_bool())
+
+    match capabilities.control_type {
+        Some(control_type)
+            if control_type == UIA_EditControlTypeId.0
+                || control_type == UIA_DocumentControlTypeId.0 =>
+        {
+            true
+        }
+        Some(control_type) if control_type == UIA_ComboBoxControlTypeId.0 => {
+            capabilities.value_pattern && capabilities.value_writable
+        }
+        _ => false,
+    }
+}
+
+fn log_eligibility_rejection(
+    element: &IUIAutomationElement,
+    capabilities: EligibilityCapabilities,
+) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    tracing::debug!(
+        control_type = ?capabilities.control_type,
+        keyboard_focusable = ?capabilities.keyboard_focusable,
+        framework_id = ?framework_id(element),
+        value_pattern = capabilities.value_pattern,
+        value_writable = capabilities.value_writable,
+        "編集系の要素と確認できない: キー注入せず編集対象なしとして扱う"
+    );
+}
+
+fn control_type(element: &IUIAutomationElement) -> Option<i32> {
+    // SAFETY: element は生きた UIA 要素。
+    Some(unsafe { element.CurrentControlType() }.ok()?.0)
+}
+
+fn keyboard_focusable(element: &IUIAutomationElement) -> Option<bool> {
+    // SAFETY: element は生きた UIA 要素。
+    Some(
+        unsafe { element.CurrentIsKeyboardFocusable() }
+            .ok()?
+            .as_bool(),
+    )
+}
+
+fn framework_id(element: &IUIAutomationElement) -> Option<BSTR> {
+    // SAFETY: element は生きた UIA 要素。返された BSTR は Drop 時に解放される。
+    unsafe { element.CurrentFrameworkId() }.ok()
+}
+
+fn value_pattern_status(element: &IUIAutomationElement) -> (bool, bool) {
+    // SAFETY: element は生きた UIA 要素。パターン未対応なら Err が返る。
+    let Ok(pattern) =
+        (unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) })
+    else {
+        return (false, false);
+    };
+    // SAFETY: pattern は直前に取得した有効な COM ポインタ。
+    let writable =
+        unsafe { pattern.CurrentIsReadOnly() }.is_ok_and(|read_only| !read_only.as_bool());
+    (true, writable)
 }
 
 /// `Ctrl+A` → `Ctrl+C` → クリップボード読み取り (§8.2 / §8.3)。
@@ -406,5 +483,101 @@ unsafe fn read_i32_array(array: *mut SAFEARRAY) -> Option<Vec<i32>> {
             ids.push(id);
         }
         Some(ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EligibilityCapabilities, is_eligible_target};
+    use windows::Win32::UI::Accessibility::{
+        UIA_ButtonControlTypeId, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId,
+        UIA_EditControlTypeId,
+    };
+
+    fn capabilities(
+        control_type: i32,
+        keyboard_focusable: bool,
+        value_pattern: bool,
+        value_writable: bool,
+    ) -> EligibilityCapabilities {
+        EligibilityCapabilities {
+            control_type: Some(control_type),
+            keyboard_focusable: Some(keyboard_focusable),
+            value_pattern,
+            value_writable,
+        }
+    }
+
+    #[test]
+    fn focusable_edit_is_eligible() {
+        assert!(is_eligible_target(capabilities(
+            UIA_EditControlTypeId.0,
+            true,
+            false,
+            false,
+        )));
+    }
+
+    #[test]
+    fn focusable_document_is_eligible() {
+        assert!(is_eligible_target(capabilities(
+            UIA_DocumentControlTypeId.0,
+            true,
+            false,
+            false,
+        )));
+    }
+
+    #[test]
+    fn zen_gecko_writable_combo_box_is_eligible() {
+        assert_eq!(UIA_ComboBoxControlTypeId.0, 50003);
+        assert!(is_eligible_target(capabilities(
+            UIA_ComboBoxControlTypeId.0,
+            true,
+            true,
+            true,
+        )));
+    }
+
+    #[test]
+    fn combo_box_requires_a_writable_value_pattern() {
+        assert!(!is_eligible_target(capabilities(
+            UIA_ComboBoxControlTypeId.0,
+            true,
+            true,
+            false,
+        )));
+        assert!(!is_eligible_target(capabilities(
+            UIA_ComboBoxControlTypeId.0,
+            true,
+            false,
+            false,
+        )));
+    }
+
+    #[test]
+    fn arbitrary_writable_value_pattern_control_is_not_eligible() {
+        assert!(!is_eligible_target(capabilities(
+            UIA_ButtonControlTypeId.0,
+            true,
+            true,
+            true,
+        )));
+    }
+
+    #[test]
+    fn non_focusable_controls_are_not_eligible() {
+        for control_type in [
+            UIA_EditControlTypeId.0,
+            UIA_DocumentControlTypeId.0,
+            UIA_ComboBoxControlTypeId.0,
+        ] {
+            assert!(!is_eligible_target(capabilities(
+                control_type,
+                false,
+                true,
+                true,
+            )));
+        }
     }
 }

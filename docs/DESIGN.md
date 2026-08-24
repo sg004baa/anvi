@@ -574,17 +574,20 @@ winit は既にインライン IME として振る舞う（→ 4.2）。host が
 
 | UIA で確認するもの | 条件 |
 |---|---|
-| ControlType | `Edit` または `Document` |
+| ControlType | `Edit`、`Document`、または下記の ValuePattern 条件も満たす `ComboBox` |
 | キーボード入力 | `IsKeyboardFocusable == true` |
+| ValuePattern（`ComboBox` のみ） | pattern が存在し、`CurrentIsReadOnly == false` |
 | 復帰先 | 対象自身または前面 root window の HWND を特定できる |
 
-条件を満たした対象は、アプリや `FrameworkId` にかかわらず
-`Ctrl+A` → `Ctrl+C` → `CF_UNICODETEXT` 読み取りの 1 経路だけで取得する。
-`ValuePattern.CurrentValue` と `TextPattern.DocumentRange` は読まない。UIA provider が返す
-文字列が nvim バッファへ入る経路は存在しない。
+書き込み可能な ValuePattern を持つだけの任意の ControlType は対象にしない。条件を満たした対象は、
+アプリや `FrameworkId` にかかわらず `Ctrl+A` → `Ctrl+C` → `CF_UNICODETEXT` 読み取りの
+1 経路だけで取得する。`ValuePattern.CurrentValue` と `TextPattern.DocumentRange` は読まない。
+UIA provider が返す文字列が nvim バッファへ入る経路は存在しない。
 
-この経路は通常の Edit、Chromium / Electron の `contenteditable`、Slack のリッチテキスト
-入力欄を同じように扱う。扱う内容は常にプレーンテキストであり、書式は保持しない（→ 10.3）。
+Zen Browser / Gecko のアドレス・検索欄は、キーボードフォーカス可能で書き込み可能な
+ValuePattern を持つ `ComboBox` としてこの適格性を満たす。通常の Edit、Chromium / Electron の
+`contenteditable`、Slack のリッチテキスト入力欄と同じクリップボード経路で扱う。扱う内容は
+常にプレーンテキストであり、書式は保持しない（→ 10.3）。
 
 ### 8.2 クリップボード取得の注意
 
@@ -624,9 +627,10 @@ Windows アプリからクリップボードで取得するテキストは `\r\n
 |---|---|
 | `Ctrl+A` → `Ctrl+C` → `CF_UNICODETEXT` | `Ctrl+A` → `Ctrl+V` |
 
-確認済みのすべての Edit / Document 対象でこの 1 経路だけを使う。アプリ、
-`FrameworkId`、UIA pattern の有無による分岐はなく、`SetValue` も使わない。
-UIA の役割は編集可能性、復帰先 HWND、取得時と書き戻し時の対象 identity の安全確認に限る。
+適格性を確認済みのすべての対象でこの 1 経路だけを使う。ValuePattern は `ComboBox` の
+適格性判定にだけ使い、取得・書き戻しではアプリ、`FrameworkId`、UIA pattern による分岐をせず、
+`SetValue` も使わない。UIA の役割は編集可能性、復帰先 HWND、取得時と書き戻し時の対象
+identity の安全確認に限る。
 
 取得時には `IUIAutomationElement`、RuntimeId（provider が返す場合）、HWND を UIA スレッド内に
 保持する。プレーンな行配列と HWND だけがスレッド外へ出る。
@@ -637,7 +641,7 @@ controller が編集ウィンドウを隠して取得時の HWND を前面へ戻
 `GetFocusedElement()` を取り直す。次のすべてを満たさない限り、クリップボード変更も
 キー注入も行わない。
 
-1. フォーカス要素が `Edit` / `Document` かつ `IsKeyboardFocusable == true`
+1. フォーカス要素が 8.1 と同じ適格性（ControlType、キーボードフォーカス、`ComboBox` の ValuePattern）を満たす
 2. 取得時に RuntimeId が得られた場合は同じ RuntimeId。RuntimeId は COM wrapper ではなく
    論理要素の identity なので、正規な provider が同じ論理要素の wrapper を再作成しても一致する
 3. RuntimeId を公開しない provider では `IUIAutomation::CompareElements` が真
@@ -693,9 +697,9 @@ Slack の `contenteditable` は書き込み可能な `ValuePattern` を持つが
 
 ### 10.1 Electron 系アプリ（Slack / Discord など）
 
-UIA がフォーカス要素を Edit / Document かつキーボード入力可能と公開する
-`contenteditable` は、Slack を含めて内容を編集できる。取得も書き戻しも通常の入力欄と同じ
-コピー / 貼り付け経路であり、UIA pattern や `FrameworkId` による特別扱いはない。
+UIA がフォーカス要素を 8.1 の適格な編集対象として公開する `contenteditable` は、Slack を
+含めて内容を編集できる。取得も書き戻しも通常の入力欄と同じコピー / 貼り付け経路であり、
+アプリや `FrameworkId` による特別扱いはない。
 
 サポートするのはプレーンテキストとしての内容編集である。元のリッチテキスト書式は保持しない
 （→ 10.3）。またクリップボードを一時的に占有する（→ 10.4）。
