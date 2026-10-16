@@ -84,6 +84,12 @@ pub enum UserEvent {
         target: isize,
     },
     Hide,
+    /// Acknowledge only after the GUI thread has hidden its HWND and restored
+    /// the target. Posting Hide alone does not order cross-thread focus changes.
+    HideAndRestore {
+        target: isize,
+        reply: std::sync::mpsc::Sender<anyhow::Result<()>>,
+    },
     Focus,
     Quit,
     /// Initial child startup failed; preserve the error as the process result.
@@ -226,6 +232,12 @@ impl ApplicationHandler<UserEvent> for App {
                 None => tracing::debug!("hide requested before the window exists"),
             },
             UserEvent::Focus => self.on_focus_request(),
+            UserEvent::HideAndRestore { target, reply } => {
+                if let Some(surface) = self.surface.as_ref() {
+                    window::hide(&surface.window);
+                }
+                let _ = reply.send(crate::focus::set_foreground(target));
+            }
             UserEvent::Hotkey => self.send(Cmd::Hotkey),
             UserEvent::ToggleAutostart => self.tray.apply_autostart(),
             UserEvent::Quit => {

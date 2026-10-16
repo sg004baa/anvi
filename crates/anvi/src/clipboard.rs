@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
@@ -17,6 +17,10 @@ use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+};
+use windows::core::w;
 
 /// `OpenClipboard` は他プロセスが握っている間失敗する。短時間リトライする。
 const OPEN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -34,15 +38,56 @@ const UNICODE_TEXT: u32 = CF_UNICODETEXT.0 as u32;
 pub struct Snapshot(Option<String>);
 
 /// クリップボードを開いている間だけ生きるガード。`CloseClipboard` を必ず通す。
-struct Clipboard;
+struct Clipboard {
+    _owner: ClipboardOwner,
+}
+
+/// An HWND owned by the calling thread. OpenClipboard(NULL) followed by
+/// EmptyClipboard leaves a NULL owner, for which SetClipboardData can fail.
+/// A message-only STATIC window needs no application class or visible surface.
+struct ClipboardOwner(HWND);
+
+impl ClipboardOwner {
+    fn new() -> Result<Self> {
+        // SAFETY: STATIC is a system class; no pointers or callback state are
+        // passed. Creation and destruction happen on the same calling thread.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("anvi clipboard"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+        }
+        .context("could not create the clipboard owner window")?;
+        Ok(Self(hwnd))
+    }
+}
+
+impl Drop for ClipboardOwner {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the HWND and is dropped on its creating thread,
+        // after Clipboard::drop has closed the clipboard.
+        let _ = unsafe { DestroyWindow(self.0) };
+    }
+}
 
 impl Clipboard {
     fn open() -> Result<Self> {
+        let owner = ClipboardOwner::new()?;
         let deadline = Instant::now() + OPEN_TIMEOUT;
         loop {
-            // SAFETY: 所有ウィンドウを渡さない (None) 呼び出しで、ポインタを扱わない。
-            match unsafe { OpenClipboard(None) } {
-                Ok(()) => return Ok(Self),
+            // SAFETY: owner is a live HWND created on this thread.
+            match unsafe { OpenClipboard(Some(owner.0)) } {
+                Ok(()) => return Ok(Self { _owner: owner }),
                 Err(e) => {
                     if Instant::now() >= deadline {
                         return Err(e).with_context(|| {
@@ -200,5 +245,27 @@ impl anvi_core::Clipboard for WinClipboard {
 
     fn set(&self, text: &str) -> Result<()> {
         set_text(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_text_survives_owner_window_destruction() {
+        // Exercise the real Windows clipboard on one thread, including unicode
+        // and empty text. Restore the runner's text after the test, even on panic.
+        struct Restore(Snapshot);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = restore(&self.0);
+            }
+        }
+        let _restore = Restore(snapshot().unwrap());
+        for text in ["anvi 日本語\r\nround trip", ""] {
+            set_text(text).unwrap();
+            assert_eq!(get_text().unwrap().as_deref(), Some(text));
+        }
     }
 }

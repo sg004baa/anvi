@@ -220,16 +220,27 @@ impl Controller {
 
     /// DESIGN 付録 B ホットキーハンドラ。
     fn on_hotkey(&mut self) {
-        if self.nvim.is_none() || self.recovery_pending || self.policy.is_exiting() {
+        if self.recovery_pending || self.policy.check().is_err() {
             tracing::debug!("hotkey ignored while nvim is unavailable");
             return;
+        }
+        // A failed replacement must not leave the resident permanently unable
+        // to edit. Retry on explicit user demand without a background busy loop.
+        if self.nvim.is_none() {
+            if !self.ever_started {
+                return; // Cmd::Start follows GUI initialization.
+            }
+            if let Err(err) = self.restart_pair() {
+                tracing::error!(error = %format_args!("{err:#}"), "hotkey recovery failed");
+                return;
+            }
         }
         match self.session.phase() {
             // 既存セッションへ戻すだけ（DESIGN 6.1）。
             Phase::Editing => self.notify_gui(UserEvent::Focus),
             Phase::Idle => {
                 if let Err(err) = self.begin_session() {
-                    tracing::error!(%err, "cannot start a session");
+                    tracing::error!(error = %format_args!("{err:#}"), "cannot start a session");
                 }
             }
             // Capturing / Applying は一瞬で通過する遷移状態。取りこぼして構わない。
@@ -365,25 +376,30 @@ impl Controller {
             return;
         }
 
-        self.notify_gui(UserEvent::Hide);
-        let restored = focus::set_foreground(self.target_hwnd);
+        let restored = self.hide_and_restore();
         let applied = self.session.on_end();
-        if let Err(err) = restored {
-            // フォーカスが戻らなくても書き戻しは試す。UIA `SetValue` 経路は
-            // フォーカスに依存せず（DESIGN 9.1）、諦めると編集内容が消えるだけ。
-            tracing::error!(%err, "focus restore failed; attempting write-back anyway");
-        }
 
         match applied {
             Applied::WriteBack(lines) => {
-                if let Err(err) = self.uia.write_back(&lines) {
-                    tracing::error!(%err, "write-back failed");
+                if let Err(err) = restored.and_then(|()| self.uia.write_back(&lines)) {
+                    tracing::error!(error = %format_args!("{err:#}"), "write-back failed");
                 }
             }
             // 相手アプリの undo 履歴を無駄に汚さない（DESIGN 9.4）。
             Applied::Unchanged => tracing::debug!("content unchanged; write-back skipped"),
             Applied::Discarded => tracing::debug!("never written; discarded"),
         }
+    }
+
+    fn hide_and_restore(&self) -> anyhow::Result<()> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::HideAndRestore {
+                target: self.target_hwnd,
+                reply,
+            })
+            .map_err(|_| anyhow!("the gui event loop is gone"))?;
+        wait_for_gui(&rx, &self.policy, Duration::from_secs(2))
     }
 
     /// 安全網（DESIGN 6.3）。ペアを再起動して Idle へ戻す。
@@ -466,6 +482,31 @@ impl Controller {
     }
 }
 
+/// Bound GUI waits and allow process exit even if the event loop stops responding.
+fn wait_for_gui(
+    rx: &Receiver<anyhow::Result<()>>,
+    policy: &SpawnPolicy,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if policy.is_exiting() {
+            return Err(anyhow!("application is exiting"));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!("timed out waiting for the editor to hide"));
+        }
+        match rx.recv_timeout(remaining.min(Duration::from_millis(20))) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("the gui dropped the focus restoration request"));
+            }
+        }
+    }
+}
+
 /// `NvimServer` のイベント列を `Cmd::Host` へ流す（tokio ランタイム上のタスク）。
 ///
 /// 世代が進んでいたら旧ペアのタスクなので自終する。ただしこのチェックは enqueue 前に
@@ -518,4 +559,67 @@ fn pump_redraw(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_gui;
+    use anvi_core::SpawnPolicy;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    #[test]
+    fn write_back_waits_for_gui_completion_and_propagates_focus_failure() {
+        let (tx, rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = wait_for_gui(&rx, &SpawnPolicy::default(), Duration::from_secs(2));
+            done_tx.send(result).unwrap();
+        });
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        tx.send(Err(anyhow::anyhow!("focus refused"))).unwrap();
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+            "focus refused"
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn gui_wait_accepts_success_and_detects_a_dropped_request() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(())).unwrap();
+        wait_for_gui(&rx, &SpawnPolicy::default(), Duration::from_secs(1)).unwrap();
+        drop(tx);
+        assert!(wait_for_gui(&rx, &SpawnPolicy::default(), Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn gui_wait_is_bounded_and_interruptible_by_exit() {
+        let (_tx, rx) = mpsc::channel();
+        assert!(wait_for_gui(&rx, &SpawnPolicy::default(), Duration::ZERO).is_err());
+        let policy = Arc::new(SpawnPolicy::default());
+        let worker_policy = Arc::clone(&policy);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(wait_for_gui(&rx, &worker_policy, Duration::from_secs(30)))
+                .unwrap();
+        });
+        policy.exit();
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_err()
+        );
+        worker.join().unwrap();
+    }
 }
