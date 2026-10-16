@@ -7,8 +7,8 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::bail;
 use anvi_core::SpawnPolicy;
+use anyhow::bail;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow, SetForegroundWindow,
