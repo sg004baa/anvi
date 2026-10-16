@@ -220,6 +220,7 @@ impl Controller {
 
     /// DESIGN 付録 B ホットキーハンドラ。
     fn on_hotkey(&mut self) {
+        tracing::info!("hotkey received by controller");
         if self.recovery_pending || self.policy.check().is_err() {
             tracing::debug!("hotkey ignored while nvim is unavailable");
             return;
@@ -255,7 +256,7 @@ impl Controller {
             return Ok(());
         }
 
-        let captured = match self.uia.capture() {
+        let captured = match crate::timing::measure("capture", || self.uia.capture()) {
             Ok(Some(captured)) => captured,
             // 編集対象が無ければ何もせず Idle へ戻る。通知も不要（DESIGN 8.3）。
             Ok(None) => {
@@ -279,10 +280,10 @@ impl Controller {
         );
 
         // filetype は指定しない。見た目とオプションはローカル設定の領分（DESIGN 5.4）。
-        let started = match self.nvim.as_ref() {
+        let started = crate::timing::measure("nvim.start_session", || match self.nvim.as_ref() {
             Some(nvim) => self.rpc(nvim.start_session(&captured.lines, None)),
             None => Err(anyhow!("nvim is unavailable")),
-        };
+        });
         if let Err(err) = started {
             self.session.abort_capture();
             return Err(err.context("start_session failed"));
@@ -399,7 +400,8 @@ impl Controller {
                 reply,
             })
             .map_err(|_| anyhow!("the gui event loop is gone"))?;
-        wait_for_gui(&rx, &self.policy, Duration::from_secs(2))
+        wait_for_gui(&rx, &self.policy, Duration::from_secs(2))?;
+        focus::wait_for_foreground(self.target_hwnd, &self.policy)
     }
 
     /// 安全網（DESIGN 6.3）。ペアを再起動して Idle へ戻す。
@@ -431,7 +433,9 @@ impl Controller {
 
         // `spawn_pair` が `ui_attach` までやり直す。GUI は新しいグリッドを
         // 最初の `grid_resize` で受け取る。
-        let pair = spawn_pair(&self.bundle, &self.rt, &self.policy)?;
+        let pair = crate::timing::measure("nvim.spawn_pair", || {
+            spawn_pair(&self.bundle, &self.rt, &self.policy)
+        })?;
         forward(
             &self.rt,
             pair.host_rx,

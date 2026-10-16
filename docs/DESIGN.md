@@ -552,10 +552,11 @@ D3D11 デバイス → D2D デバイスコンテキスト → 合成用スワッ
 
 ### 7.3 フォーカス復帰
 
-Windows には `SetForegroundWindow` の呼び出し制限があるため、単純に呼んでも効かないことがある。winit の `Window::focus_window()` は素で `SetForegroundWindow` を呼ぶだけなので使わない。
+Windows の前面化制限を尊重して `SetForegroundWindow` を一度だけ要求する。拒否時はログを残し、表示済みの編集ウィンドウはクリック／Alt+Tab で選べる状態にする。
 
-- **現在の前面ウィンドウのスレッド**へ `AttachThreadInput` してから `SetForegroundWindow` を呼ぶ（対象スレッドへアタッチする版は実機で拒否された）
-- `AllowSetForegroundWindow` を併用し、最後に `GetForegroundWindow` で結果を検証する
+- `AttachThreadInput` は使わない。入力キューを共有すると、相手アプリの停止が前面化や Alt+Tab まで巻き込むため
+- 別スレッドへの前面化は非同期。GUI は要求の受理だけを返し、controller が最大750ms、`GetForegroundWindow` で完了を確認する。GUI のメッセージ処理は待たせない
+- 同期的な `BringWindowToTop` による別アプリの応答待ちも行わない
 - UIA が返すのは子コントロールの HWND なので、必ず `GA_ROOT` を解決してから扱う
 
 ### 7.4 IME（このアプリの主目的）
@@ -646,7 +647,7 @@ identity の安全確認に限る。
 ### 9.2 書き戻し先の安全確認
 
 GUI スレッドが編集ウィンドウを隠し、取得時の HWND を前面へ戻した結果を controller へ返す。
-controller はこの完了応答を待つ（最大 2 秒、アプリ終了時は中断）。復帰に失敗したら貼り付けない。
+controller はこの要求応答を待ち（最大 2 秒、アプリ終了時は中断）、さらに前面化完了を最大 750 ms 確認する。復帰に失敗したら貼り付けない。
 その後、UIA で
 `GetFocusedElement()` を取り直す。次のすべてを満たさない限り、クリップボード変更も
 キー注入も行わない。
@@ -854,7 +855,7 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 
 ### ステップ 5 — フォーカス復帰の泥仕事
 
-- `AttachThreadInput` / `AllowSetForegroundWindow`
+- `SetForegroundWindow` の要求と、controller 上での前面確認
 - 実アプリでの検証。ここは試行錯誤になる
 
 ### ステップ 6 — ローカル設定の読み込み

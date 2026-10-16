@@ -229,11 +229,14 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
                 element,
                 hwnd,
             };
-            ensure_same_edit_target(uia, &target)?;
+            // copy_all checks identity again after any clipboard/modifier waits.
+            // Avoid another synchronous provider round trip here.
             ensure_foreground(foreground)?;
             ensure_target_foreground(&target)?;
-            let text = capture_via_clipboard(uia, &target)
-                .context("編集対象からクリップボード経由でテキストを取得できなかった")?;
+            let text = crate::timing::measure("capture.clipboard", || {
+                capture_via_clipboard(uia, &target)
+            })
+            .context("編集対象からクリップボード経由でテキストを取得できなかった")?;
             let captured = Captured {
                 lines: to_lines(&text),
                 hwnd,
@@ -258,14 +261,18 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
 /// Retry only discovery, never a copy/paste operation with side effects.
 fn editable_element(uia: &IUIAutomation) -> Option<IUIAutomationElement> {
     // SAFETY: uia はこのスレッドで生成した有効な COM ポインタ。
-    let Ok(element) = (unsafe { uia.GetFocusedElement() }) else {
+    let Ok(element) = crate::timing::measure("uia.focused_element", || unsafe {
+        uia.GetFocusedElement()
+    }) else {
         // フォーカス要素が特定できない → 何もせず Idle に戻る (§8.3)。
         tracing::debug!("GetFocusedElement に失敗: 編集対象なしとして扱う");
         return None;
     };
 
     // 編集対象として適格と確認できない相手には Ctrl+A / Ctrl+C を注入しない (§8.3)。
-    let capabilities = eligibility_capabilities(&element);
+    let capabilities = crate::timing::measure("uia.eligibility", || {
+        eligibility_capabilities(&element)
+    });
     if !is_eligible_target(capabilities) {
         log_eligibility_rejection(&element, capabilities);
         return None;
@@ -343,10 +350,29 @@ struct EligibilityCapabilities {
 }
 
 fn eligibility_capabilities(element: &IUIAutomationElement) -> EligibilityCapabilities {
-    let (value_pattern, value_writable) = value_pattern_status(element);
+    query_capabilities(control_type(element), keyboard_focusable(element), || {
+        value_pattern_status(element)
+    })
+}
+
+fn query_capabilities(
+    control_type: Option<i32>,
+    keyboard_focusable: Option<bool>,
+    value_status: impl FnOnce() -> (bool, bool),
+) -> EligibilityCapabilities {
+    // ValuePattern is only relevant to editable ComboBoxes (including Zen's
+    // search field). Do not ask every provider for an unused pattern/read-only
+    // property on every discovery and identity check.
+    let (value_pattern, value_writable) = if control_type == Some(UIA_ComboBoxControlTypeId.0)
+        && keyboard_focusable == Some(true)
+    {
+        value_status()
+    } else {
+        (false, false)
+    };
     EligibilityCapabilities {
-        control_type: control_type(element),
-        keyboard_focusable: keyboard_focusable(element),
+        control_type,
+        keyboard_focusable,
         value_pattern,
         value_writable,
     }
@@ -644,6 +670,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "different window");
+    }
+
+    #[test]
+    fn only_focusable_combo_boxes_query_the_value_provider() {
+        for control in [UIA_EditControlTypeId.0, UIA_DocumentControlTypeId.0] {
+            let caps = super::query_capabilities(Some(control), Some(true), || {
+                panic!("this control does not need ValuePattern")
+            });
+            assert!(is_eligible_target(caps));
+        }
+        let caps = super::query_capabilities(
+            Some(UIA_ComboBoxControlTypeId.0),
+            Some(false),
+            || panic!("unfocusable controls must not query ValuePattern"),
+        );
+        assert!(!is_eligible_target(caps));
+        for writable in [true, false] {
+            let mut queried = false;
+            let caps = super::query_capabilities(
+                Some(UIA_ComboBoxControlTypeId.0),
+                Some(true),
+                || {
+                    queried = true;
+                    (true, writable)
+                },
+            );
+            assert!(queried);
+            assert_eq!(is_eligible_target(caps), writable);
+        }
     }
 
     fn capabilities(
