@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anvi_core::SpawnPolicy;
 use anvi_core::text::{to_crlf, to_lines};
@@ -34,6 +34,9 @@ use crate::keys;
 
 /// `Ctrl+C` の完了待ちの上限。タイムアウトの扱いは §8.3 に従う。
 const COPY_TIMEOUT: Duration = Duration::from_millis(400);
+
+const FOCUS_TIMEOUT: Duration = Duration::from_millis(750);
+const FOCUS_POLL: Duration = Duration::from_millis(25);
 
 /// 貼り付け後、クリップボードを復元するまでの待ち。
 ///
@@ -207,59 +210,106 @@ fn capture(uia: &IUIAutomation, slot: &mut Option<Target>) -> Result<Option<Capt
     // 前セッションの対象は必ず捨てる。取得に失敗したあとで古い対象に書き戻すのは事故。
     *slot = None;
 
+    // Hotkey modifiers can temporarily change the focused UIA element (menus,
+    // browser chrome). Wait before discovering the target, not just before copy.
+    let foreground = crate::focus::foreground_window();
+    if foreground == 0 {
+        return Ok(None);
+    }
+    keys::wait_modifiers_released()?;
+    let deadline = Instant::now() + FOCUS_TIMEOUT;
+    loop {
+        ensure_foreground(foreground)?;
+        if let Some(element) = editable_element(uia) {
+            let Some(hwnd) = target_hwnd(&element) else {
+                return Ok(None);
+            };
+            let target = Target {
+                runtime_id: runtime_id(&element),
+                element,
+                hwnd,
+            };
+            // copy_all checks identity again after any clipboard/modifier waits.
+            // Avoid another synchronous provider round trip here.
+            ensure_foreground(foreground)?;
+            ensure_target_foreground(&target)?;
+            let text =
+                crate::timing::measure("capture.clipboard", || capture_via_clipboard(uia, &target))
+                    .context("編集対象からクリップボード経由でテキストを取得できなかった")?;
+            let captured = Captured {
+                lines: to_lines(&text),
+                hwnd,
+            };
+            tracing::info!(
+                route = "Clipboard",
+                lines = captured.lines.len(),
+                hwnd,
+                "captured"
+            );
+            *slot = Some(target);
+            return Ok(Some(captured));
+        }
+        if Instant::now() >= deadline {
+            tracing::info!(foreground, "no editable target after focus discovery wait");
+            return Ok(None);
+        }
+        std::thread::sleep(FOCUS_POLL);
+    }
+}
+
+/// Retry only discovery, never a copy/paste operation with side effects.
+fn editable_element(uia: &IUIAutomation) -> Option<IUIAutomationElement> {
     // SAFETY: uia はこのスレッドで生成した有効な COM ポインタ。
-    let Ok(element) = (unsafe { uia.GetFocusedElement() }) else {
+    let Ok(element) =
+        crate::timing::measure("uia.focused_element", || unsafe { uia.GetFocusedElement() })
+    else {
         // フォーカス要素が特定できない → 何もせず Idle に戻る (§8.3)。
         tracing::debug!("GetFocusedElement に失敗: 編集対象なしとして扱う");
-        return Ok(None);
-    };
-
-    let Some(hwnd) = target_hwnd(&element) else {
-        tracing::debug!("対象の HWND を特定できない: 編集対象なしとして扱う");
-        return Ok(None);
+        return None;
     };
 
     // 編集対象として適格と確認できない相手には Ctrl+A / Ctrl+C を注入しない (§8.3)。
-    let capabilities = eligibility_capabilities(&element);
+    let capabilities =
+        crate::timing::measure("uia.eligibility", || eligibility_capabilities(&element));
     if !is_eligible_target(capabilities) {
         log_eligibility_rejection(&element, capabilities);
-        return Ok(None);
+        return None;
     }
 
-    let text = capture_via_clipboard()
-        .context("編集対象からクリップボード経由でテキストを取得できなかった")?;
-    Ok(Some(retain(slot, element, hwnd, &text)))
-}
-
-fn retain(
-    slot: &mut Option<Target>,
-    element: IUIAutomationElement,
-    hwnd: isize,
-    text: &str,
-) -> Captured {
-    let lines = to_lines(text);
-    let runtime_id = runtime_id(&element);
-    tracing::info!(
-        route = "Clipboard",
-        lines = lines.len(),
-        chars = text.chars().count(),
-        hwnd = format_args!("{hwnd:#x}"),
-        "captured"
-    );
-    *slot = Some(Target {
-        element,
-        runtime_id,
-        hwnd,
-    });
-    Captured { lines, hwnd }
+    Some(element)
 }
 
 /// 取得時と同じ編集対象へクリップボード貼り付けで書き戻す (§9.1)。
 fn write_back(uia: &IUIAutomation, target: Option<&Target>, lines: &[String]) -> Result<()> {
     let target = target.context("書き戻し対象が保持されていない")?;
-    ensure_same_edit_target(uia, target)?;
+    keys::wait_modifiers_released()?;
+    // Restoring the foreground HWND does not mean its accessibility provider has
+    // already reported the restored child focus. Poll identity without stealing
+    // focus from another field or retrying a paste.
+    wait_for_target(
+        || ensure_target_foreground(target),
+        || ensure_same_edit_target(uia, target),
+        FOCUS_TIMEOUT,
+    )?;
     // 結合は常に CRLF（`CF_UNICODETEXT` の慣習。旧来の EDIT コントロールもこれを要求する）。
-    paste_back(target, &to_crlf(lines))
+    paste_back(uia, target, &to_crlf(lines))
+}
+
+fn wait_for_target(
+    mut foreground: impl FnMut() -> Result<()>,
+    mut identity: impl FnMut() -> Result<()>,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        foreground()?;
+        match identity() {
+            Ok(()) => break,
+            Err(err) if Instant::now() >= deadline => return Err(err),
+            Err(_) => std::thread::sleep(FOCUS_POLL),
+        }
+    }
+    Ok(())
 }
 
 /// フォーカス中の要素が取得時と同じ編集対象であることを確認する。
@@ -298,10 +348,28 @@ struct EligibilityCapabilities {
 }
 
 fn eligibility_capabilities(element: &IUIAutomationElement) -> EligibilityCapabilities {
-    let (value_pattern, value_writable) = value_pattern_status(element);
+    query_capabilities(control_type(element), keyboard_focusable(element), || {
+        value_pattern_status(element)
+    })
+}
+
+fn query_capabilities(
+    control_type: Option<i32>,
+    keyboard_focusable: Option<bool>,
+    value_status: impl FnOnce() -> (bool, bool),
+) -> EligibilityCapabilities {
+    // ValuePattern is only relevant to editable ComboBoxes (including Zen's
+    // search field). Do not ask every provider for an unused pattern/read-only
+    // property on every discovery and identity check.
+    let (value_pattern, value_writable) =
+        if control_type == Some(UIA_ComboBoxControlTypeId.0) && keyboard_focusable == Some(true) {
+            value_status()
+        } else {
+            (false, false)
+        };
     EligibilityCapabilities {
-        control_type: control_type(element),
-        keyboard_focusable: keyboard_focusable(element),
+        control_type,
+        keyboard_focusable,
         value_pattern,
         value_writable,
     }
@@ -378,10 +446,10 @@ fn value_pattern_status(element: &IUIAutomationElement) -> (bool, bool) {
 /// `Ctrl+A` → `Ctrl+C` → クリップボード読み取り (§8.2 / §8.3)。
 ///
 /// 呼び出し前に対象が編集系であることを確認済みであること。
-fn capture_via_clipboard() -> Result<String> {
+fn capture_via_clipboard(uia: &IUIAutomation, target: &Target) -> Result<String> {
     let saved = clipboard::snapshot().context("クリップボードの退避に失敗")?;
     let baseline = clipboard::sequence_number();
-    let captured = copy_selection(baseline);
+    let captured = copy_selection(uia, target, baseline);
     // Ctrl+C が空振りした（空欄）場合はクリップボードが手つかずなので、復元と称して
     // 触らない。触ると、テキスト以外の形式で無事に残っていた内容を壊してしまう。
     if clipboard::sequence_number() != baseline {
@@ -393,9 +461,11 @@ fn capture_via_clipboard() -> Result<String> {
     captured
 }
 
-fn copy_selection(baseline: u32) -> Result<String> {
-    keys::select_all()?;
-    keys::copy()?;
+fn copy_selection(uia: &IUIAutomation, target: &Target, baseline: u32) -> Result<String> {
+    keys::copy_all(|| {
+        ensure_same_edit_target(uia, target)?;
+        ensure_target_foreground(target)
+    })?;
     if !clipboard::wait_for_change(baseline, COPY_TIMEOUT) {
         // 空の入力欄では Ctrl+C してもクリップボードは更新されない。ここへ来るのは
         // 対象が編集系と確認できている場合だけなので、空文字として続行する (§8.3)。
@@ -408,10 +478,10 @@ fn copy_selection(baseline: u32) -> Result<String> {
 /// クリップボード貼り付けによる書き戻し (§9.3)。
 ///
 /// フォーカスは呼び出し側 (controller) が既に対象へ戻している。
-fn paste_back(target: &Target, text: &str) -> Result<()> {
+fn paste_back(uia: &IUIAutomation, target: &Target, text: &str) -> Result<()> {
     ensure_target_foreground(target)?;
     let saved = clipboard::snapshot().context("クリップボードの退避に失敗")?;
-    let pasted = paste_text(text);
+    let pasted = paste_text(uia, target, text);
     if let Err(e) = clipboard::restore(&saved) {
         tracing::warn!("クリップボードの復元に失敗 (best effort): {e:#}");
     }
@@ -423,12 +493,16 @@ fn paste_back(target: &Target, text: &str) -> Result<()> {
 /// フォーカス復帰 (§9.3 手順 3) が失敗したまま `Ctrl+A` / `Ctrl+V` を撃つと、
 /// 無関係なウィンドウの内容を破壊する。取得時に HWND を保持しているのはこのため。
 fn ensure_target_foreground(target: &Target) -> Result<()> {
-    let expected = root_window(target.hwnd);
+    ensure_foreground(target.hwnd)
+}
+
+fn ensure_foreground(hwnd: isize) -> Result<()> {
+    let expected = root_window(hwnd);
     let actual = root_window(crate::focus::foreground_window());
     if expected == 0 || expected != actual {
         bail!(
             "書き戻し対象 (hwnd={:#x}) が前面ではない (前面の root=hwnd={:#x}) ため、キー注入を中止した",
-            target.hwnd,
+            hwnd,
             actual
         );
     }
@@ -442,11 +516,13 @@ fn root_window(hwnd: isize) -> isize {
     unsafe { GetAncestor(HWND(hwnd as *mut c_void), GA_ROOT) }.0 as isize
 }
 
-fn paste_text(text: &str) -> Result<()> {
+fn paste_text(uia: &IUIAutomation, target: &Target, text: &str) -> Result<()> {
     clipboard::set_text(text).context("編集結果をクリップボードへ置けなかった")?;
     // フォーカスが戻った時点で選択範囲は失われているため、必ず選択し直す (§9.3)。
-    keys::select_all()?;
-    keys::paste()?;
+    keys::paste_all(|| {
+        ensure_same_edit_target(uia, target)?;
+        ensure_target_foreground(target)
+    })?;
     std::thread::sleep(PASTE_SETTLE);
     Ok(())
 }
@@ -506,7 +582,7 @@ unsafe fn read_i32_array(array: *mut SAFEARRAY) -> Option<Vec<i32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EligibilityCapabilities, Reply, Uia, is_eligible_target};
+    use super::{EligibilityCapabilities, Reply, Uia, is_eligible_target, wait_for_target};
     use anvi_core::SpawnPolicy;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
@@ -555,6 +631,67 @@ mod tests {
                 .is_err()
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn delayed_child_focus_is_rechecked_before_write_back() {
+        let mut attempts = 0;
+        wait_for_target(
+            || Ok(()),
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    anyhow::bail!("provider still reports the old focus");
+                }
+                Ok(())
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn wrong_field_times_out_and_switching_windows_aborts_immediately() {
+        let err = wait_for_target(
+            || Ok(()),
+            || anyhow::bail!("different field"),
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "different field");
+        let err = wait_for_target(
+            || anyhow::bail!("different window"),
+            || panic!("identity must not allow another window"),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "different window");
+    }
+
+    #[test]
+    fn only_focusable_combo_boxes_query_the_value_provider() {
+        for control in [UIA_EditControlTypeId.0, UIA_DocumentControlTypeId.0] {
+            let caps = super::query_capabilities(Some(control), Some(true), || {
+                panic!("this control does not need ValuePattern")
+            });
+            assert!(is_eligible_target(caps));
+        }
+        let caps =
+            super::query_capabilities(Some(UIA_ComboBoxControlTypeId.0), Some(false), || {
+                panic!("unfocusable controls must not query ValuePattern")
+            });
+        assert!(!is_eligible_target(caps));
+        for writable in [true, false] {
+            let mut queried = false;
+            let caps =
+                super::query_capabilities(Some(UIA_ComboBoxControlTypeId.0), Some(true), || {
+                    queried = true;
+                    (true, writable)
+                });
+            assert!(queried);
+            assert_eq!(is_eligible_target(caps), writable);
+        }
     }
 
     fn capabilities(

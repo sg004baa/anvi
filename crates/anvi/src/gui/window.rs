@@ -4,9 +4,8 @@
 //! 直に叩くのは **表示位置決め**（対象ウィンドウの矩形とモニタの作業領域）と
 //! **前面化** の 2 つだけで、前面化は [`crate::focus`] の作法をそのまま使う。
 //!
-//! winit の `Window::focus_window` は使わない。あれは `SetForegroundWindow` を素で
-//! 呼ぶだけで、実機では呼び出し制限に引っかかって無言で失敗する。前面スレッドへ
-//! `AttachThreadInput` してから叩く作法が要る（→ [`crate::focus`]）。
+//! Foreground requests do not attach input queues. A busy target application
+//! must not prevent the GUI thread or Alt+Tab from processing input.
 
 use anyhow::{Context as _, bail};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};

@@ -84,6 +84,12 @@ pub enum UserEvent {
         target: isize,
     },
     Hide,
+    /// Acknowledge after hiding the HWND and requesting target activation.
+    /// The controller confirms asynchronous activation without blocking the GUI.
+    HideAndRestore {
+        target: isize,
+        reply: std::sync::mpsc::Sender<anyhow::Result<()>>,
+    },
     Focus,
     Quit,
     /// Initial child startup failed; preserve the error as the process result.
@@ -226,7 +232,16 @@ impl ApplicationHandler<UserEvent> for App {
                 None => tracing::debug!("hide requested before the window exists"),
             },
             UserEvent::Focus => self.on_focus_request(),
-            UserEvent::Hotkey => self.send(Cmd::Hotkey),
+            UserEvent::HideAndRestore { target, reply } => {
+                if let Some(surface) = self.surface.as_ref() {
+                    window::hide(&surface.window);
+                }
+                let _ = reply.send(crate::focus::set_foreground(target));
+            }
+            UserEvent::Hotkey => {
+                tracing::info!("hotkey received by gui");
+                self.send(Cmd::Hotkey);
+            }
             UserEvent::ToggleAutostart => self.tray.apply_autostart(),
             UserEvent::Quit => {
                 tracing::info!("exit requested");
@@ -418,7 +433,9 @@ impl App {
             tracing::error!("show requested before the window exists");
             return;
         };
-        if let Err(err) = window::show(&surface.window, surface.hwnd, target) {
+        if let Err(err) = crate::timing::measure("editor.show", || {
+            window::show(&surface.window, surface.hwnd, target)
+        }) {
             tracing::error!(%err, "cannot bring the editor window to the front");
         }
     }

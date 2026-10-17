@@ -552,10 +552,11 @@ D3D11 デバイス → D2D デバイスコンテキスト → 合成用スワッ
 
 ### 7.3 フォーカス復帰
 
-Windows には `SetForegroundWindow` の呼び出し制限があるため、単純に呼んでも効かないことがある。winit の `Window::focus_window()` は素で `SetForegroundWindow` を呼ぶだけなので使わない。
+Windows の前面化制限を尊重して `SetForegroundWindow` を一度だけ要求する。拒否時はログを残し、表示済みの編集ウィンドウはクリック／Alt+Tab で選べる状態にする。
 
-- **現在の前面ウィンドウのスレッド**へ `AttachThreadInput` してから `SetForegroundWindow` を呼ぶ（対象スレッドへアタッチする版は実機で拒否された）
-- `AllowSetForegroundWindow` を併用し、最後に `GetForegroundWindow` で結果を検証する
+- `AttachThreadInput` は使わない。入力キューを共有すると、相手アプリの停止が前面化や Alt+Tab まで巻き込むため
+- 別スレッドへの前面化は非同期。GUI は要求の受理だけを返し、controller が最大750ms、`GetForegroundWindow` で完了を確認する。GUI のメッセージ処理は待たせない
+- 同期的な `BringWindowToTop` による別アプリの応答待ちも行わない
 - UIA が返すのは子コントロールの HWND なので、必ず `GA_ROOT` を解決してから扱う
 
 ### 7.4 IME（このアプリの主目的）
@@ -607,7 +608,9 @@ ValuePattern を持つ `ComboBox` としてこの適格性を満たす。通常�
 
 ### 8.3 取得できなかった場合
 
-フォーカス要素、HWND、または編集可能性を UIA で確認できなかった場合は、キーを一切注入せず
+ホットキーの修飾キー解放後、同じ前面ウィンドウに留まっている間だけ、UIA の編集対象探索を
+最大 750 ms、25 ms 間隔で再試行する（個々の COM 呼び出し時間はこの上限に含めて制限できない）。
+コピー処理そのものは再試行しない。フォーカス要素、HWND、または編集可能性を確認できなかった場合は、キーを一切注入せず
 Idle に戻る。エラー通知も不要（要件「編集対象が存在しない場合は何もしない」）。
 
 編集対象と確認した後のコピータイムアウトは「取得失敗」と「空の入力欄」を区別できないため、
@@ -643,7 +646,9 @@ identity の安全確認に限る。
 
 ### 9.2 書き戻し先の安全確認
 
-controller が編集ウィンドウを隠して取得時の HWND を前面へ戻した後、UIA で
+GUI スレッドが編集ウィンドウを隠し、取得時の HWND を前面へ戻した結果を controller へ返す。
+controller はこの要求応答を待ち（最大 2 秒、アプリ終了時は中断）、さらに前面化完了を最大 750 ms 確認する。復帰に失敗したら貼り付けない。
+その後、UIA で
 `GetFocusedElement()` を取り直す。次のすべてを満たさない限り、クリップボード変更も
 キー注入も行わない。
 
@@ -652,6 +657,10 @@ controller が編集ウィンドウを隠して取得時の HWND を前面へ戻
    論理要素の identity なので、正規な provider が同じ論理要素の wrapper を再作成しても一致する
 3. RuntimeId を公開しない provider では `IUIAutomation::CompareElements` が真
 4. キー注入の直前に、取得時 HWND と現在の前面ウィンドウの root HWND が一致する
+
+前面ウィンドウが一致する間だけ、子要素のフォーカス復帰を最大 750 ms、25 ms 間隔で待つ。
+別の入力欄への強制フォーカス移動や貼り付け再試行は行わない。
+クリップボード操作や修飾キー待ちの間にもフォーカスは変わり得るため、キー注入直前に identity と root HWND を再確認する。
 
 対象アプリが入力欄そのものを破棄・再作成して RuntimeId が変わった場合は、見た目が同じでも
 別要素として書き戻しを中止する。別の入力欄へ全文貼り付けするより、編集結果を適用できない方を
@@ -667,6 +676,11 @@ controller が編集ウィンドウを隠して取得時の HWND を前面へ戻
 6. `Ctrl+A`（フォーカス復帰で取得時の選択範囲は失われているため、必ず全体を選択し直す）
 7. `Ctrl+V`
 8. 貼り付けの取り込みを短時間待ってからクリップボードを復元する（復元は best effort）
+
+`Ctrl+A` と `Ctrl+V`（取得時は `Ctrl+C`）は、修飾キー解放待ちと対象の再確認後、
+一つの `SendInput` バッチで送る。自分が注入した Ctrl の解放を次のキー送信で待たない。
+`OpenClipboard` には同一スレッドで作った message-only HWND を渡し、`CloseClipboard` 後に破棄する。
+所有者なしの `EmptyClipboard` → `SetClipboardData` を避ける。
 
 ### 9.4 変更がない場合
 
@@ -841,7 +855,7 @@ UI もホットキーも UIA も一切実装しない。host はコンソール�
 
 ### ステップ 5 — フォーカス復帰の泥仕事
 
-- `AttachThreadInput` / `AllowSetForegroundWindow`
+- `SetForegroundWindow` の要求と、controller 上での前面確認
 - 実アプリでの検証。ここは試行錯誤になる
 
 ### ステップ 6 — ローカル設定の読み込み

@@ -41,25 +41,25 @@ pub fn wait_modifiers_released() -> Result<()> {
     }
 }
 
-/// `Ctrl+A`。フォーカスが戻った時点で選択範囲は失われているため、貼り付け前にも
-/// 必ず呼ぶ (§9.3)。
-pub fn select_all() -> Result<()> {
-    ctrl_chord(VK_A).context("Ctrl+A の注入に失敗")
+/// Validate focus after modifier release, then enqueue selection and copy in one
+/// batch. Do not wait on our own synthetic Ctrl state between the two chords.
+pub fn copy_all(check_target: impl FnOnce() -> Result<()>) -> Result<()> {
+    select_and(VK_C, check_target).context("Ctrl+A / Ctrl+C の注入に失敗")
 }
 
-/// `Ctrl+C`。
-pub fn copy() -> Result<()> {
-    ctrl_chord(VK_C).context("Ctrl+C の注入に失敗")
+/// Selection and paste share the same final target check and input batch.
+pub fn paste_all(check_target: impl FnOnce() -> Result<()>) -> Result<()> {
+    select_and(VK_V, check_target).context("Ctrl+A / Ctrl+V の注入に失敗")
 }
 
-/// `Ctrl+V`。
-pub fn paste() -> Result<()> {
-    ctrl_chord(VK_V).context("Ctrl+V の注入に失敗")
-}
-
-fn ctrl_chord(vk: VIRTUAL_KEY) -> Result<()> {
+fn select_and(vk: VIRTUAL_KEY, check_target: impl FnOnce() -> Result<()>) -> Result<()> {
     wait_modifiers_released()?;
+    check_target()?;
     send(&[
+        key_event(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
+        key_event(VK_A, KEYBD_EVENT_FLAGS(0)),
+        key_event(VK_A, KEYEVENTF_KEYUP),
+        key_event(VK_CONTROL, KEYEVENTF_KEYUP),
         key_event(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
         key_event(vk, KEYBD_EVENT_FLAGS(0)),
         key_event(vk, KEYEVENTF_KEYUP),

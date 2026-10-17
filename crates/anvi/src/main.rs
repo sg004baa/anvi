@@ -27,6 +27,7 @@ mod gui;
 mod hotkey;
 mod keys;
 mod shutdown;
+mod timing;
 mod tray;
 mod uia;
 
