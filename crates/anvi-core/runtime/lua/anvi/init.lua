@@ -37,6 +37,7 @@ end
 
 --- host がセッション開始時に呼ぶ
 function M.start_session(lines, filetype)
+  require("anvi.history").close()
   -- 古いバッファを破棄（DESIGN §4.1 / §6.4）
   if M.buf and vim.api.nvim_buf_is_valid(M.buf) then
     vim.api.nvim_buf_delete(M.buf, { force = true })
@@ -66,13 +67,23 @@ end
 
 --- セッション終了（nvim は死なない）。反映するかは host が「保存を受信したか」で決める
 local function finish()
+  if require("anvi.history").back() then
+    return
+  end
   notify("session_end", nil)
 end
 
 --- 同梱コア。ローカル設定より前に一度だけ呼ぶ
 function M.setup()
+  vim.api.nvim_create_user_command("AnviHistory", function()
+    require("anvi.history").open()
+  end, {})
+
   -- bang = true は必須。`:q!` は abbrev 展開で「AnviQuit!」の形になるため
   vim.api.nvim_create_user_command("AnviWriteQuit", function()
+    if require("anvi.history").back() then
+      return
+    end
     vim.cmd("write") -- BufWriteCmd 経由で内容が host に渡る
     finish()
   end, { bang = true })
