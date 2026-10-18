@@ -552,3 +552,21 @@ async fn history_handles_empty_content_resize_and_external_close() {
     expect_quiet(&mut events).await;
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn history_is_available_when_local_config_replaces_runtimepath() {
+    let appname = "anvi-test-history-runtimepath";
+    let dir = config_dir(appname);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("init.lua"), "vim.opt.runtimepath = {}\n").unwrap();
+    let (mut server, mut events, client) = start(appname).await;
+    server.attach_ui(80, 24).await.unwrap();
+    server.set_history(&[owned(&["saved"])]).await.unwrap();
+    start_session(&server, &owned(&["original"])).await;
+    lua(&client, "vim.cmd('AnviHistory')").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["saved"]));
+    lua(&client, "vim.cmd('AnviQuit')").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["original"]));
+    expect_quiet(&mut events).await;
+    server.shutdown().await.unwrap();
+}

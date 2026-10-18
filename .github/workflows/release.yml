@@ -148,6 +148,7 @@ jobs:
             "$installDir\anvi.exe",
             "$installDir\runtime\init.lua",
             "$installDir\runtime\lua\anvi\init.lua",
+            "$installDir\runtime\lua\anvi\history.lua",
             "$installDir\nvim\bin\nvim.exe",
             "$installDir\nvim\share\nvim\runtime"
           )) {

@@ -2,6 +2,9 @@
 -- 持つのは host との RPC、セッションバッファ、`:w` / `:q` 系の乗っ取り、
 -- 異常終了通知だけ。見た目やキーマップはローカル設定の領分（DESIGN §5.4）。
 
+-- Load bundled dependencies before local configuration can replace runtimepath.
+local history = require("anvi.history")
+
 local M = {
   host = nil, -- host の RPC チャンネル ID
   buf = nil, -- 現在のセッションバッファ
@@ -35,9 +38,14 @@ function M.set_host(chan)
   M.pending = {}
 end
 
+--- Keep the bundled module reference independent of later runtimepath changes.
+function M.set_history(entries)
+  history.set(entries)
+end
+
 --- host がセッション開始時に呼ぶ
 function M.start_session(lines, filetype)
-  require("anvi.history").close()
+  history.close()
   -- 古いバッファを破棄（DESIGN §4.1 / §6.4）
   if M.buf and vim.api.nvim_buf_is_valid(M.buf) then
     vim.api.nvim_buf_delete(M.buf, { force = true })
@@ -67,7 +75,7 @@ end
 
 --- セッション終了（nvim は死なない）。反映するかは host が「保存を受信したか」で決める
 local function finish()
-  if require("anvi.history").back() then
+  if history.back() then
     return
   end
   notify("session_end", nil)
@@ -76,12 +84,12 @@ end
 --- 同梱コア。ローカル設定より前に一度だけ呼ぶ
 function M.setup()
   vim.api.nvim_create_user_command("AnviHistory", function()
-    require("anvi.history").open()
+    history.open()
   end, {})
 
   -- bang = true は必須。`:q!` は abbrev 展開で「AnviQuit!」の形になるため
   vim.api.nvim_create_user_command("AnviWriteQuit", function()
-    if require("anvi.history").back() then
+    if history.back() then
       return
     end
     vim.cmd("write") -- BufWriteCmd 経由で内容が host に渡る

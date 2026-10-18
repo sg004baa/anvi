@@ -279,7 +279,7 @@ impl NvimServer {
                 .collect(),
         );
         self.nvim
-            .exec_lua("require('anvi.history').set(...)", vec![entries])
+            .exec_lua("require('anvi').set_history(...)", vec![entries])
             .await
             .context("setting saved history failed")?;
         Ok(())
