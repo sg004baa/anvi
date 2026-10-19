@@ -263,6 +263,28 @@ impl NvimServer {
         Ok(())
     }
 
+    /// Replace the display copy of history. The host retains the authoritative copy.
+    pub async fn set_history(&self, history: &[Vec<String>]) -> anyhow::Result<()> {
+        let entries = Value::Array(
+            history
+                .iter()
+                .map(|lines| {
+                    Value::Array(
+                        lines
+                            .iter()
+                            .map(|line| Value::from(line.as_str()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
+        self.nvim
+            .exec_lua("require('anvi').set_history(...)", vec![entries])
+            .await
+            .context("setting saved history failed")?;
+        Ok(())
+    }
+
     /// この RPC チャンネルを UI クライアントとして登録する。以後 `redraw` 通知が
     /// [`NvimHandles::redraw`] へ流れてくる。
     ///

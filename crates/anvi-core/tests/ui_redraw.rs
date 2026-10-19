@@ -155,3 +155,57 @@ async fn typed_wide_chars_keep_their_continuation_cells() {
 
     server.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn history_list_hides_the_cell_cursor_but_body_and_editor_restore_it() {
+    let (mut server, mut handles) = start("anvi-test-history-row-cursor").await;
+    let mut state = attach_and_settle(&server, &mut handles).await;
+    server.try_resize(80, 24).await.unwrap();
+    apply_until(&mut state, &mut handles.redraw, "picker viewport", |s| {
+        s.grid.rows() == 24
+    })
+    .await;
+
+    server
+        .set_history(&[vec!["first".into()], vec!["second".into()]])
+        .await
+        .unwrap();
+    server.start_session(&["edit".into()], None).await.unwrap();
+    server.input(":AnviHistory<CR>").await.unwrap();
+    apply_until(&mut state, &mut handles.redraw, "hidden list cursor", |s| {
+        s.cursor_hidden() && !s.busy
+    })
+    .await;
+    let col = state.cursor.col;
+    let row = state.cursor.row;
+    server.input("jll").await.unwrap();
+    apply_until(&mut state, &mut handles.redraw, "row-only movement", |s| {
+        s.cursor.row == row + 1 && s.cursor.col == col && s.cursor_hidden() && !s.busy
+    })
+    .await;
+    server.input("<CR>").await.unwrap();
+    apply_until(
+        &mut state,
+        &mut handles.redraw,
+        "body cursor restored",
+        |s| !s.cursor_hidden(),
+    )
+    .await;
+    server.input("q").await.unwrap();
+    apply_until(
+        &mut state,
+        &mut handles.redraw,
+        "back to row selection",
+        |s| s.cursor_hidden() && !s.busy,
+    )
+    .await;
+    server.input("q").await.unwrap();
+    apply_until(
+        &mut state,
+        &mut handles.redraw,
+        "editor cursor restored",
+        |s| !s.cursor_hidden(),
+    )
+    .await;
+    server.shutdown().await.unwrap();
+}

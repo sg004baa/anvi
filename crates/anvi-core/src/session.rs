@@ -34,9 +34,16 @@ pub struct Session {
     original: Vec<String>,
     /// このセッションで最後に受信した `session_write` の内容。
     written: Option<Vec<String>>,
+    /// Last five completed, saved sessions, newest first. Survives reset.
+    history: Vec<Vec<String>>,
 }
 
 impl Session {
+    /// Saved snapshots, independent of the current session and nvim process.
+    pub fn history(&self) -> &[Vec<String>] {
+        &self.history
+    }
+
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -90,6 +97,10 @@ impl Session {
             return Applied::Discarded;
         }
         self.phase = Phase::Applying;
+        if let Some(lines) = &self.written {
+            self.history.insert(0, lines.clone());
+            self.history.truncate(5);
+        }
         let applied = match self.written.take() {
             Some(lines) if lines == self.original => Applied::Unchanged,
             Some(lines) => Applied::WriteBack(lines),
@@ -101,7 +112,7 @@ impl Session {
     }
 
     /// 安全網によるリカバリ（DESIGN §6.3）。位相に関係なく Idle へ戻し、
-    /// セッションのデータを捨てる。
+    /// セッションのデータを捨てる。完了済みセッションの保存履歴は保持する。
     pub fn reset(&mut self) {
         self.phase = Phase::Idle;
         self.original.clear();
@@ -230,5 +241,46 @@ mod tests {
         assert_eq!(s.on_end(), Applied::Discarded);
         // 位相は保たれる（勝手に Idle へ落とさない）
         assert_eq!(s.phase(), Phase::Capturing);
+    }
+
+    #[test]
+    fn history_records_only_last_save_including_unchanged_and_empty() {
+        let mut s = editing(&["original"]);
+        s.on_write(lines(&["intermediate"]));
+        s.on_write(lines(&["original"]));
+        assert_eq!(s.on_end(), Applied::Unchanged);
+        assert_eq!(s.history(), &[lines(&["original"])]);
+        assert!(s.begin_capture());
+        s.begin_edit(lines(&["discarded"]));
+        assert_eq!(s.on_end(), Applied::Discarded);
+        assert_eq!(s.history().len(), 1);
+        assert!(s.begin_capture());
+        s.begin_edit(lines(&["nonempty"]));
+        s.on_write(lines(&[""]));
+        assert_eq!(s.on_end(), Applied::WriteBack(lines(&[""])));
+        // Write-back failure does not roll back the already-recorded snapshot.
+        s.reset();
+        assert_eq!(s.history(), &[lines(&[""]), lines(&["original"])]);
+        assert_eq!(s.on_end(), Applied::Discarded);
+        assert_eq!(s.history().len(), 2);
+    }
+
+    #[test]
+    fn history_keeps_five_completed_sessions_across_resets() {
+        let mut s = Session::default();
+        for i in 0..7 {
+            assert!(s.begin_capture());
+            s.begin_edit(lines(&["original"]));
+            s.on_write(vec![i.to_string()]);
+            s.on_end();
+            s.reset();
+        }
+        let expected: Vec<Vec<String>> = (2..7).rev().map(|i| vec![i.to_string()]).collect();
+        assert_eq!(s.history(), expected);
+        assert!(s.begin_capture());
+        s.begin_edit(lines(&["unfinished"]));
+        s.on_write(lines(&["not completed"]));
+        s.reset();
+        assert_eq!(s.history(), expected);
     }
 }

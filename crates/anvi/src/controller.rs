@@ -281,7 +281,10 @@ impl Controller {
 
         // filetype は指定しない。見た目とオプションはローカル設定の領分（DESIGN 5.4）。
         let started = crate::timing::measure("nvim.start_session", || match self.nvim.as_ref() {
-            Some(nvim) => self.rpc(nvim.start_session(&captured.lines, None)),
+            Some(nvim) => self.rpc(async {
+                nvim.set_history(self.session.history()).await?;
+                nvim.start_session(&captured.lines, None).await
+            }),
             None => Err(anyhow!("nvim is unavailable")),
         });
         if let Err(err) = started {
@@ -377,8 +380,9 @@ impl Controller {
             return;
         }
 
-        let restored = self.hide_and_restore();
+        // Record the saved snapshot before any fallible write-back operation.
         let applied = self.session.on_end();
+        let restored = self.hide_and_restore();
 
         match applied {
             Applied::WriteBack(lines) => {

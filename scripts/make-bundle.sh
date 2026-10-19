@@ -36,7 +36,7 @@ cp "$repo/assets/fonts/LICENSE-Moralerspace.txt" "$dest/"
 cp "$repo/README.md" "$dest/"
 
 # 空ファイルを置いていないことをここで確認する。host も起動時に同じ検査をする。
-for f in "$dest/runtime/init.lua" "$dest/runtime/lua/anvi/init.lua"; do
+for f in "$dest/runtime/init.lua" "$dest/runtime/lua/anvi/init.lua" "$dest/runtime/lua/anvi/history.lua"; do
   [[ -s $f ]] || { echo "empty after copy: $f" >&2; exit 1; }
 done
 

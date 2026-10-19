@@ -213,3 +213,29 @@ async fn copies_a_blockwise_yank_without_erroring() {
 
     server.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn history_yank_respects_unnamedplus_without_writing_the_edit_session() {
+    let clip = Arc::new(Memory::default());
+    let (mut server, mut handles) = start("anvi-test-history-yank", Arc::clone(&clip)).await;
+    server.attach_ui(80, 24).await.unwrap();
+    server
+        .set_history(&[vec!["履歴の本文".into(), "second line".into()]])
+        .await
+        .unwrap();
+    server
+        .start_session(&["original".into()], None)
+        .await
+        .unwrap();
+    server
+        .input(":set clipboard=unnamedplus<CR>:AnviHistory<CR><CR>ggyG")
+        .await
+        .unwrap();
+    wait_for_clipboard(&clip, "履歴の本文\r\nsecond line\r\n").await;
+    server.input("qq:w<CR>").await.unwrap();
+    assert_eq!(
+        expect_session_write(&mut handles.host).await,
+        vec!["original"]
+    );
+    server.shutdown().await.unwrap();
+}

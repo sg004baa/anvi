@@ -463,3 +463,151 @@ async fn local_config_cannot_break_the_zz_contract() {
 
     server.shutdown().await.expect("shutdown");
 }
+
+/// History is host-owned: saved snapshots survive replacing the nvim process.
+#[tokio::test]
+async fn saved_history_survives_nvim_restart_and_preserves_the_edit_buffer() {
+    let mut session = Session::default();
+    for i in 0..6 {
+        assert!(session.begin_capture());
+        session.begin_edit(owned(&["original"]));
+        session.on_write(owned(&["intermediate"]));
+        session.on_write(vec![format!("保存 {i}"), "日本語の本文".into()]);
+        assert!(matches!(session.on_end(), Applied::WriteBack(_)));
+    }
+    let (mut old, _, _) = start("anvi-test-history-old").await;
+    old.set_history(session.history()).await.unwrap();
+    old.shutdown().await.unwrap();
+    session.reset();
+
+    let (mut server, mut events, client) = start("anvi-test-history-new").await;
+    server.attach_ui(80, 24).await.unwrap();
+    server.set_history(session.history()).await.unwrap();
+    start_session(&server, &owned(&["original"])).await;
+    lua(
+        &client,
+        "vim.o.ruler = true; vim.o.laststatus = 2; vim.api.nvim_buf_set_lines(0, 0, -1, false, {'未保存の編集'}); vim.cmd('AnviHistory')",
+    )
+    .await;
+    assert_eq!(
+        buffer_lines(&client).await,
+        owned(&[
+            "1  保存 5",
+            "2  保存 4",
+            "3  保存 3",
+            "4  保存 2",
+            "5  保存 1"
+        ])
+    );
+    assert_eq!(
+        lua(&client, "return vim.api.nvim_win_get_config(0).relative")
+            .await
+            .as_str(),
+        Some("editor")
+    );
+    assert_eq!(
+        lua(&client, "return vim.bo.modifiable").await.as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        lua(&client, "return vim.o.ruler").await.as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        lua(&client, "return vim.o.laststatus").await.as_i64(),
+        Some(2)
+    );
+    // Verify the composed Neovim screen, not just buffer data/extmark metadata.
+    let marker = lua(&client, "vim.cmd('redraw'); local pos = vim.api.nvim_win_get_position(0); return vim.fn.screenstring(pos[1]+2, pos[2]+2)").await;
+    assert_eq!(marker.as_str(), Some(">"));
+    let number = lua(&client, "local pos = vim.api.nvim_win_get_position(0); return vim.fn.screenstring(pos[1]+3, pos[2]+2)").await;
+    assert_eq!(number.as_str(), Some("2"));
+    let selection = "local ns = vim.api.nvim_get_namespaces().AnviHistorySelection; return vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, {})";
+    let marks = lua(&client, selection).await;
+    assert_eq!(marks.as_array().unwrap().len(), 1);
+    assert_eq!(
+        marks.as_array().unwrap()[0].as_array().unwrap()[1].as_i64(),
+        Some(0)
+    );
+    lua(&client, "vim.api.nvim_feedkeys('j', 'xt', false); vim.api.nvim_exec_autocmds('CursorMoved', {buffer=0})").await;
+    let marks = lua(&client, selection).await;
+    assert_eq!(
+        marks.as_array().unwrap()[0].as_array().unwrap()[1].as_i64(),
+        Some(1)
+    );
+    // Use actual normal-mode mappings, not calls to history's internal functions.
+    lua(&client, "vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'xt', false)").await;
+    assert_eq!(
+        buffer_lines(&client).await,
+        owned(&["保存 4", "日本語の本文"])
+    );
+    assert!(lua(&client, selection).await.as_array().unwrap().is_empty());
+    // Session-ending commands inside history must only navigate back.
+    lua(&client, "vim.cmd('AnviWriteQuit')").await;
+    assert_eq!(buffer_lines(&client).await.len(), 5);
+    lua(&client, "vim.api.nvim_feedkeys('q', 'xt', false)").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["未保存の編集"]));
+    assert_eq!(
+        lua(&client, "return vim.o.ruler").await.as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        lua(&client, "return vim.bo.modified").await.as_bool(),
+        Some(true)
+    );
+    expect_quiet(&mut events).await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn history_handles_empty_content_resize_and_external_close() {
+    let (mut server, mut events, client) = start("anvi-test-history-empty").await;
+    server.attach_ui(80, 24).await.unwrap();
+    start_session(&server, &owned(&["keep me"])).await;
+    lua(&client, "vim.cmd('AnviHistory')").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["[保存履歴なし]"]));
+    lua(&client, "vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR><Esc>', true, false, true), 'xt', false)").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["keep me"]));
+    server
+        .set_history(&[owned(&[""]), owned(&["", "second line"])])
+        .await
+        .unwrap();
+    lua(&client, "vim.cmd('AnviHistory'); vim.cmd('AnviHistory')").await;
+    assert_eq!(
+        buffer_lines(&client).await,
+        owned(&["1  [空の保存内容]", "2  [空の先頭行]"])
+    );
+    server.try_resize(20, 8).await.unwrap();
+    lua(&client, "vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'xt', false)").await;
+    assert_eq!(buffer_lines(&client).await, owned(&[""]));
+    lua(
+        &client,
+        "vim.api.nvim_win_close(0, true); vim.o.ruler = false; vim.cmd('AnviHistory'); vim.cmd('AnviQuit')",
+    )
+    .await;
+    assert_eq!(buffer_lines(&client).await, owned(&["keep me"]));
+    assert_eq!(
+        lua(&client, "return vim.o.ruler").await.as_bool(),
+        Some(false)
+    );
+    expect_quiet(&mut events).await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn history_is_available_when_local_config_replaces_runtimepath() {
+    let appname = "anvi-test-history-runtimepath";
+    let dir = config_dir(appname);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("init.lua"), "vim.opt.runtimepath = {}\n").unwrap();
+    let (mut server, mut events, client) = start(appname).await;
+    server.attach_ui(80, 24).await.unwrap();
+    server.set_history(&[owned(&["saved"])]).await.unwrap();
+    start_session(&server, &owned(&["original"])).await;
+    lua(&client, "vim.cmd('AnviHistory')").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["1  saved"]));
+    lua(&client, "vim.cmd('AnviQuit')").await;
+    assert_eq!(buffer_lines(&client).await, owned(&["original"]));
+    expect_quiet(&mut events).await;
+    server.shutdown().await.unwrap();
+}

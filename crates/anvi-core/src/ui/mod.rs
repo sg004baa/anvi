@@ -385,6 +385,22 @@ pub struct UiState {
     pub guifont: Option<String>,
 }
 
+impl UiState {
+    /// A fully transparent cursor highlight is used by row-selection pickers.
+    #[must_use]
+    pub fn cursor_hidden(&self) -> bool {
+        self.busy
+            || (self.mode.cursor_style_enabled()
+                && self.mode.info().is_some_and(|info| {
+                    info.attr_id != 0
+                        && self
+                            .hl
+                            .attr(info.attr_id)
+                            .is_some_and(|attr| attr.blend == 100)
+                }))
+    }
+}
+
 /// `redraw` バッチを 1 回適用した結果。描画側が「何をし直すべきか」を知るための印。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RedrawOutcome {
