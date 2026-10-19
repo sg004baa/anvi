@@ -9,6 +9,9 @@ local function mark_selection()
   vim.api.nvim_buf_clear_namespace(state.buf, selection_ns, 0, -1)
   if #entries == 0 then return end
   local row = vim.api.nvim_win_get_cursor(state.win)[1]
+  if vim.api.nvim_win_get_cursor(state.win)[2] ~= 0 then
+    vim.api.nvim_win_set_cursor(state.win, { row, 0 })
+  end
   state.index = row
   vim.api.nvim_buf_set_extmark(state.buf, selection_ns, row - 1, 0, {
     virt_text = { { ">", "CursorLineNr" } },
@@ -36,6 +39,7 @@ function M.close()
   state = nil
   if not old then return end
   vim.o.ruler = old.ruler
+  vim.o.guicursor = old.guicursor
   if vim.api.nvim_win_is_valid(old.win) then
     vim.api.nvim_win_close(old.win, true)
   end
@@ -45,6 +49,34 @@ function M.close()
   if vim.api.nvim_win_is_valid(old.origin) then
     vim.api.nvim_set_current_win(old.origin)
   end
+end
+
+local list_keys = { "j", "k", "<Down>", "<Up>", "h", "l", "<Left>", "<Right>",
+  "w", "b", "e", "0", "$", "i", "a", "I", "A", "o", "O", "v", "V", "<C-v>" }
+
+local function list_cursor()
+  if state and not state.body and vim.api.nvim_get_current_win() == state.win then
+    vim.api.nvim_set_hl(0, "AnviHistoryHiddenCursor", { blend = 100 })
+    vim.o.guicursor = "a:block-AnviHistoryHiddenCursor"
+  end
+end
+
+local function configure_navigation(body)
+  for _, key in ipairs(list_keys) do
+    if body then
+      pcall(vim.keymap.del, "n", key, { buffer = state.buf })
+    else
+      vim.keymap.set("n", key, function()
+        local delta = (key == "j" or key == "<Down>") and 1
+          or ((key == "k" or key == "<Up>") and -1 or 0)
+        local row = vim.api.nvim_win_get_cursor(state.win)[1]
+        row = math.max(1, math.min(math.max(1, #entries), row + delta * vim.v.count1))
+        vim.api.nvim_win_set_cursor(state.win, { row, 0 })
+        mark_selection()
+      end, { buffer = state.buf, silent = true, nowait = true })
+    end
+  end
+  if body then vim.o.guicursor = state.guicursor else list_cursor() end
 end
 
 local function show(body)
@@ -74,6 +106,7 @@ local function show(body)
   vim.wo[state.win].cursorline = not body
   vim.wo[state.win].wrap = body
   vim.api.nvim_win_set_cursor(state.win, { body and 1 or state.index, 0 })
+  configure_navigation(body)
   mark_selection()
 end
 
@@ -102,7 +135,7 @@ function M.open()
   vim.bo[buf].undofile = false
   vim.bo[buf].undolevels = -1
   local win = vim.api.nvim_open_win(buf, true, config(false))
-  state = { origin = origin, buf = buf, win = win, index = 1, body = false, ruler = vim.o.ruler }
+  state = { origin = origin, buf = buf, win = win, index = 1, body = false, ruler = vim.o.ruler, guicursor = vim.o.guicursor }
   -- With laststatus=2, Neovim prints a second position readout for floats
   -- on the command line. Keep the original statusline, hide only that ruler.
   vim.o.ruler = false
@@ -119,6 +152,16 @@ function M.open()
   end)
   -- Native motions/yank and the user's clipboard setting are left untouched.
   local group = vim.api.nvim_create_augroup("AnviHistory", { clear = true })
+  vim.api.nvim_create_autocmd("WinLeave", {
+    group = group, buffer = buf,
+    callback = function() if state then vim.o.guicursor = state.guicursor end end,
+  })
+  vim.api.nvim_create_autocmd("WinEnter", {
+    group = group, buffer = buf, callback = list_cursor,
+  })
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = group, callback = list_cursor,
+  })
   vim.api.nvim_create_autocmd("CursorMoved", {
     group = group,
     buffer = buf,
@@ -137,6 +180,7 @@ function M.open()
     callback = function()
       if state and state.win == win then
         vim.o.ruler = state.ruler
+        vim.o.guicursor = state.guicursor
         state = nil
       end
     end,

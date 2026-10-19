@@ -623,7 +623,7 @@ impl Renderer {
     /// `busy_start` の間は描かない（nvim は「カーソルを消せ」の意味で送ってくる）。
     /// `cursor_style_enabled` が偽なら `mode_info_set` の形は使わずブロックにする。
     fn paint_cursor(&mut self, ui: &UiState) -> anyhow::Result<()> {
-        if ui.busy {
+        if ui.cursor_hidden() {
             return Ok(());
         }
         let cols = ui.grid.cols();
