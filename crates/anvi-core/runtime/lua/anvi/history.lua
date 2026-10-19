@@ -56,7 +56,7 @@ local list_keys = { "j", "k", "<Down>", "<Up>", "h", "l", "<Left>", "<Right>",
 
 local function list_cursor()
   if state and not state.body and vim.api.nvim_get_current_win() == state.win then
-    vim.api.nvim_set_hl(0, "AnviHistoryHiddenCursor", { blend = 100 })
+    vim.api.nvim_set_hl(0, "AnviHistoryHiddenCursor", { fg = "#000000", bg = "#000000", blend = 100 })
     vim.o.guicursor = "a:block-AnviHistoryHiddenCursor"
   end
 end

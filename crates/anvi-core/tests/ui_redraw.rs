@@ -160,6 +160,12 @@ async fn typed_wide_chars_keep_their_continuation_cells() {
 async fn history_list_hides_the_cell_cursor_but_body_and_editor_restore_it() {
     let (mut server, mut handles) = start("anvi-test-history-row-cursor").await;
     let mut state = attach_and_settle(&server, &mut handles).await;
+    server.try_resize(80, 24).await.unwrap();
+    apply_until(&mut state, &mut handles.redraw, "picker viewport", |s| {
+        s.grid.rows() == 24
+    })
+    .await;
+
     server
         .set_history(&[vec!["first".into()], vec!["second".into()]])
         .await
