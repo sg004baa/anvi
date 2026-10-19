@@ -491,7 +491,13 @@ async fn saved_history_survives_nvim_restart_and_preserves_the_edit_buffer() {
     .await;
     assert_eq!(
         buffer_lines(&client).await,
-        owned(&["保存 5", "保存 4", "保存 3", "保存 2", "保存 1"])
+        owned(&[
+            "1  保存 5",
+            "2  保存 4",
+            "3  保存 3",
+            "4  保存 2",
+            "5  保存 1"
+        ])
     );
     assert_eq!(
         lua(&client, "return vim.api.nvim_win_get_config(0).relative")
@@ -503,12 +509,26 @@ async fn saved_history_survives_nvim_restart_and_preserves_the_edit_buffer() {
         lua(&client, "return vim.bo.modifiable").await.as_bool(),
         Some(false)
     );
+    let selection = "local ns = vim.api.nvim_get_namespaces().AnviHistorySelection; return vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, {})";
+    let marks = lua(&client, selection).await;
+    assert_eq!(marks.as_array().unwrap().len(), 1);
+    assert_eq!(
+        marks.as_array().unwrap()[0].as_array().unwrap()[1].as_i64(),
+        Some(0)
+    );
+    lua(&client, "vim.api.nvim_feedkeys('j', 'xt', false); vim.api.nvim_exec_autocmds('CursorMoved', {buffer=0})").await;
+    let marks = lua(&client, selection).await;
+    assert_eq!(
+        marks.as_array().unwrap()[0].as_array().unwrap()[1].as_i64(),
+        Some(1)
+    );
     // Use actual normal-mode mappings, not calls to history's internal functions.
-    lua(&client, "vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('j<CR>', true, false, true), 'xt', false)").await;
+    lua(&client, "vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'xt', false)").await;
     assert_eq!(
         buffer_lines(&client).await,
         owned(&["保存 4", "日本語の本文"])
     );
+    assert!(lua(&client, selection).await.as_array().unwrap().is_empty());
     // Session-ending commands inside history must only navigate back.
     lua(&client, "vim.cmd('AnviWriteQuit')").await;
     assert_eq!(buffer_lines(&client).await.len(), 5);
@@ -538,7 +558,7 @@ async fn history_handles_empty_content_resize_and_external_close() {
     lua(&client, "vim.cmd('AnviHistory'); vim.cmd('AnviHistory')").await;
     assert_eq!(
         buffer_lines(&client).await,
-        owned(&["[空の保存内容]", "[空の先頭行]"])
+        owned(&["1  [空の保存内容]", "2  [空の先頭行]"])
     );
     server.try_resize(20, 8).await.unwrap();
     lua(&client, "vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'xt', false)").await;
@@ -564,7 +584,7 @@ async fn history_is_available_when_local_config_replaces_runtimepath() {
     server.set_history(&[owned(&["saved"])]).await.unwrap();
     start_session(&server, &owned(&["original"])).await;
     lua(&client, "vim.cmd('AnviHistory')").await;
-    assert_eq!(buffer_lines(&client).await, owned(&["saved"]));
+    assert_eq!(buffer_lines(&client).await, owned(&["1  saved"]));
     lua(&client, "vim.cmd('AnviQuit')").await;
     assert_eq!(buffer_lines(&client).await, owned(&["original"]));
     expect_quiet(&mut events).await;

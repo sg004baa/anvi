@@ -2,6 +2,19 @@
 local M = {}
 local entries = {}
 local state
+local selection_ns = vim.api.nvim_create_namespace("AnviHistorySelection")
+
+local function mark_selection()
+  if not state or state.body then return end
+  vim.api.nvim_buf_clear_namespace(state.buf, selection_ns, 0, -1)
+  if #entries == 0 then return end
+  local row = vim.api.nvim_win_get_cursor(state.win)[1]
+  state.index = row
+  vim.api.nvim_buf_set_extmark(state.buf, selection_ns, row - 1, 0, {
+    virt_text = { { ">", "CursorLineNr" } },
+    virt_text_pos = "overlay",
+  })
+end
 
 local function config(body)
   local width = math.max(1, math.min(80, vim.o.columns - 4))
@@ -35,18 +48,19 @@ end
 
 local function show(body)
   state.body = body
+  vim.api.nvim_buf_clear_namespace(state.buf, selection_ns, 0, -1)
   local lines = {}
   if body then
     lines = entries[state.index]
   elseif #entries == 0 then
     lines = { "[保存履歴なし]" }
   else
-    for _, saved in ipairs(entries) do
+    for index, saved in ipairs(entries) do
       local first = saved[1] or ""
       if first == "" then
         first = (#saved <= 1) and "[空の保存内容]" or "[空の先頭行]"
       end
-      table.insert(lines, first)
+      table.insert(lines, tostring(index) .. "  " .. first)
     end
   end
   vim.bo[state.buf].readonly = false
@@ -59,6 +73,7 @@ local function show(body)
   vim.wo[state.win].cursorline = not body
   vim.wo[state.win].wrap = body
   vim.api.nvim_win_set_cursor(state.win, { body and 1 or state.index, 0 })
+  mark_selection()
 end
 
 -- Called by both buffer-local mappings and anvi's session-end commands.
@@ -100,6 +115,11 @@ function M.open()
   end)
   -- Native motions/yank and the user's clipboard setting are left untouched.
   local group = vim.api.nvim_create_augroup("AnviHistory", { clear = true })
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group,
+    buffer = buf,
+    callback = mark_selection,
+  })
   vim.api.nvim_create_autocmd("VimResized", {
     group = group,
     callback = function()

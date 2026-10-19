@@ -472,10 +472,10 @@ impl Renderer {
                 buf.clear();
                 buf.extend(cell.text.as_str().encode_utf16());
                 let mut span = if wide { 2 } else { 1 };
-                if !wide {
+                if !wide && box_arms(cell.text.as_str()).is_none() {
                     while col + span < cols {
                         let next = cells[col + span];
-                        if next.text.is_empty() {
+                        if next.text.is_empty() || box_arms(next.text.as_str()).is_some() {
                             break;
                         }
                         // 次のセルが全角なら、そこから新しいランを始める。
@@ -534,6 +534,21 @@ impl Renderer {
         }
 
         let brush = self.brush(style.fg)?;
+        // Neovim treats these borders as one cell with ambiwidth=single, but
+        // the bundled CJK font gives them a two-cell advance. Draw their strokes
+        // on the grid instead of allowing font metrics to shift/overlap the UI.
+        if text.len() == 1
+            && let Some(ch) = char::from_u32(u32::from(text[0]))
+            && let Some(arms) = box_arms(ch.encode_utf8(&mut [0; 4]))
+        {
+            for rect in box_rects(arms, width, cell.height, self.scale.round().max(1.0)) {
+                self.fill(
+                    rect_of(x + rect.left, y + rect.top, x + rect.right, y + rect.bottom),
+                    &brush,
+                );
+            }
+            return Ok(());
+        }
         let layout = self.styled_layout(text, style, width, cell.height)?;
         // SAFETY: BeginDraw 済み。layout と brush はこのフレームで生きている。
         unsafe {
@@ -1213,6 +1228,44 @@ fn wide_nul(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+// Left, right, up, down. Keep the six single-border glyphs independent of
+// the selected font's East Asian ambiguous-width metrics.
+fn box_arms(text: &str) -> Option<[bool; 4]> {
+    Some(match text {
+        "─" => [true, true, false, false],
+        "│" => [false, false, true, true],
+        "┌" => [false, true, false, true],
+        "┐" => [true, false, false, true],
+        "└" => [false, true, true, false],
+        "┘" => [true, false, true, false],
+        _ => return None,
+    })
+}
+
+fn box_rects(arms: [bool; 4], width: f32, height: f32, thickness: f32) -> Vec<D2D_RECT_F> {
+    let t = thickness.min(width).min(height);
+    let cx = ((width - t) / 2.0).floor().max(0.0);
+    let cy = ((height - t) / 2.0).floor().max(0.0);
+    let mut rects = Vec::with_capacity(2);
+    if arms[0] || arms[1] {
+        rects.push(rect_of(
+            if arms[0] { 0.0 } else { cx },
+            cy,
+            if arms[1] { width } else { cx + t },
+            cy + t,
+        ));
+    }
+    if arms[2] || arms[3] {
+        rects.push(rect_of(
+            cx,
+            if arms[2] { 0.0 } else { cy },
+            cx + t,
+            if arms[3] { height } else { cy + t },
+        ));
+    }
+    rects
+}
+
 const fn rect_of(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
     D2D_RECT_F {
         left,
@@ -1359,6 +1412,34 @@ fn client_size(hwnd: HWND) -> anyhow::Result<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn single_borders_stay_inside_their_grid_cells_and_join_at_edges() {
+        for (width, height, thickness) in [(10.5, 23.0, 1.0), (15.75, 35.0, 2.0)] {
+            for glyph in ["─", "│", "┌", "┐", "└", "┘"] {
+                let arms = super::box_arms(glyph).unwrap();
+                let rects = super::box_rects(arms, width, height, thickness);
+                for r in &rects {
+                    assert!(r.left >= 0.0 && r.right <= width);
+                    assert!(r.top >= 0.0 && r.bottom <= height);
+                    assert!(r.left < r.right && r.top < r.bottom);
+                }
+                for (arm, reaches) in [
+                    rects.iter().any(|r| r.left == 0.0),
+                    rects.iter().any(|r| r.right == width),
+                    rects.iter().any(|r| r.top == 0.0),
+                    rects.iter().any(|r| r.bottom == height),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    assert_eq!(arms[arm], reaches, "{glyph} arm {arm}");
+                }
+            }
+        }
+        assert!(super::box_arms("a").is_none());
+        assert!(super::box_arms("あ").is_none());
+    }
+
     use super::{utf16_len_upto, wide_nul};
 
     #[test]
