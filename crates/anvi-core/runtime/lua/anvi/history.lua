@@ -35,6 +35,7 @@ function M.close()
   local old = state
   state = nil
   if not old then return end
+  vim.o.ruler = old.ruler
   if vim.api.nvim_win_is_valid(old.win) then
     vim.api.nvim_win_close(old.win, true)
   end
@@ -101,7 +102,10 @@ function M.open()
   vim.bo[buf].undofile = false
   vim.bo[buf].undolevels = -1
   local win = vim.api.nvim_open_win(buf, true, config(false))
-  state = { origin = origin, buf = buf, win = win, index = 1, body = false }
+  state = { origin = origin, buf = buf, win = win, index = 1, body = false, ruler = vim.o.ruler }
+  -- With laststatus=2, Neovim prints a second position readout for floats
+  -- on the command line. Keep the original statusline, hide only that ruler.
+  vim.o.ruler = false
   local function map(key, callback)
     vim.keymap.set("n", key, callback, { buffer = buf, silent = true, nowait = true })
   end
@@ -131,7 +135,10 @@ function M.open()
     pattern = tostring(win),
     once = true,
     callback = function()
-      if state and state.win == win then state = nil end
+      if state and state.win == win then
+        vim.o.ruler = state.ruler
+        state = nil
+      end
     end,
   })
   show(false)

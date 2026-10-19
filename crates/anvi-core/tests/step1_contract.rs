@@ -486,7 +486,7 @@ async fn saved_history_survives_nvim_restart_and_preserves_the_edit_buffer() {
     start_session(&server, &owned(&["original"])).await;
     lua(
         &client,
-        "vim.api.nvim_buf_set_lines(0, 0, -1, false, {'未保存の編集'}); vim.cmd('AnviHistory')",
+        "vim.o.ruler = true; vim.o.laststatus = 2; vim.api.nvim_buf_set_lines(0, 0, -1, false, {'未保存の編集'}); vim.cmd('AnviHistory')",
     )
     .await;
     assert_eq!(
@@ -509,6 +509,19 @@ async fn saved_history_survives_nvim_restart_and_preserves_the_edit_buffer() {
         lua(&client, "return vim.bo.modifiable").await.as_bool(),
         Some(false)
     );
+    assert_eq!(
+        lua(&client, "return vim.o.ruler").await.as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        lua(&client, "return vim.o.laststatus").await.as_i64(),
+        Some(2)
+    );
+    // Verify the composed Neovim screen, not just buffer data/extmark metadata.
+    let marker = lua(&client, "vim.cmd('redraw'); local pos = vim.api.nvim_win_get_position(0); return vim.fn.screenstring(pos[1]+2, pos[2]+2)").await;
+    assert_eq!(marker.as_str(), Some(">"));
+    let number = lua(&client, "local pos = vim.api.nvim_win_get_position(0); return vim.fn.screenstring(pos[1]+3, pos[2]+2)").await;
+    assert_eq!(number.as_str(), Some("2"));
     let selection = "local ns = vim.api.nvim_get_namespaces().AnviHistorySelection; return vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, {})";
     let marks = lua(&client, selection).await;
     assert_eq!(marks.as_array().unwrap().len(), 1);
@@ -534,6 +547,10 @@ async fn saved_history_survives_nvim_restart_and_preserves_the_edit_buffer() {
     assert_eq!(buffer_lines(&client).await.len(), 5);
     lua(&client, "vim.api.nvim_feedkeys('q', 'xt', false)").await;
     assert_eq!(buffer_lines(&client).await, owned(&["未保存の編集"]));
+    assert_eq!(
+        lua(&client, "return vim.o.ruler").await.as_bool(),
+        Some(true)
+    );
     assert_eq!(
         lua(&client, "return vim.bo.modified").await.as_bool(),
         Some(true)
@@ -565,10 +582,14 @@ async fn history_handles_empty_content_resize_and_external_close() {
     assert_eq!(buffer_lines(&client).await, owned(&[""]));
     lua(
         &client,
-        "vim.api.nvim_win_close(0, true); vim.cmd('AnviHistory'); vim.cmd('AnviQuit')",
+        "vim.api.nvim_win_close(0, true); vim.o.ruler = false; vim.cmd('AnviHistory'); vim.cmd('AnviQuit')",
     )
     .await;
     assert_eq!(buffer_lines(&client).await, owned(&["keep me"]));
+    assert_eq!(
+        lua(&client, "return vim.o.ruler").await.as_bool(),
+        Some(false)
+    );
     expect_quiet(&mut events).await;
     server.shutdown().await.unwrap();
 }
