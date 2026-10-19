@@ -14,7 +14,7 @@ local function mark_selection()
   end
   state.index = row
   vim.api.nvim_buf_set_extmark(state.buf, selection_ns, row - 1, 0, {
-    virt_text = { { ">", "CursorLineNr" } },
+    virt_text = { { ">", "CursorLine" } },
     virt_text_pos = "overlay",
   })
 end
